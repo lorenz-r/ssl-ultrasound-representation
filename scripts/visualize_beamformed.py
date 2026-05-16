@@ -218,7 +218,18 @@ def das_beamform(
     rx_idx   = np.arange(n_rx)[:, np.newaxis, np.newaxis]
     beamformed = np.zeros((nz, nx), dtype=np.complex64)
 
-    for ev, ev_list in groups:
+    # For focused (MultiFocal) acquisitions: restrict each scan-line's contribution
+    # to the lateral Voronoi cell of its aperture centre.  FSA and plane-wave
+    # compound across the full aperture, so they get no mask.
+    if not is_fsa and not is_plane:
+        origins = np.array([g[0]["origin_x"] for g in groups], dtype=np.float32)  # (N_groups,)
+        # For every x in the image grid, find the nearest scan-line centre
+        dist_to_origin = np.abs(x_grid[np.newaxis, :] - origins[:, np.newaxis])   # (N_groups, nx)
+        nearest_group  = np.argmin(dist_to_origin, axis=0)                         # (nx,)
+    else:
+        nearest_group = None
+
+    for grp_idx, (ev, ev_list) in enumerate(groups):
         # Average RF over repeated acquisitions for the same TX position
         rf_acq = np.zeros((n_rx, n_samp), dtype=np.float32)
         cnt    = 0
@@ -255,7 +266,13 @@ def das_beamform(
         va     = iq_acq[rx_idx, si_i]
         vb     = iq_acq[rx_idx, np.minimum(si_i + 1, n_samp - 1)]
         values = va + frac * (vb - va)                            # (n_rx, nz, nx)
-        beamformed += (values * rx_apod).sum(axis=0)
+        contribution = (values * rx_apod).sum(axis=0)             # (nz, nx)
+
+        if nearest_group is not None:
+            # Zero out lateral positions that belong to a different scan-line
+            contribution *= (nearest_group == grp_idx)            # broadcast over nz
+
+        beamformed += contribution
 
     env     = np.abs(beamformed)
     env     = np.maximum(env, 1e-9)
