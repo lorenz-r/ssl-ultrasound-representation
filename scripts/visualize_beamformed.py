@@ -234,10 +234,28 @@ def das_beamform(
     rx_idx = np.arange(n_rx)[:, np.newaxis, np.newaxis]
     beamformed = np.zeros((nz, nx), dtype=np.complex64)
 
-    # Restrict each scan-line's contribution to the Voronoi cell of its aperture centre
-    origins = np.array([g[0]["origin_x"] for g in groups], dtype=np.float32)
-    dist_to_origin = np.abs(x_grid[np.newaxis, :] - origins[:, np.newaxis])  # (N_groups, nx)
-    nearest_group = np.argmin(dist_to_origin, axis=0)  # (nx,)
+    # 2D Voronoi in (origin_x, focus_z) space.
+    # A 1D Voronoi keyed only on origin_x silently drops every focal zone beyond
+    # the first because all FZ groups at the same lateral position are tied —
+    # argmin always returns the lowest index (FZ1).  The 2D version selects the
+    # group whose (lateral, depth) centre is nearest to each image pixel.
+    origins_x = np.array([g[0]["origin_x"] for g in groups], dtype=np.float64)
+    origins_z = np.array([g[0]["focus_m"]  for g in groups], dtype=np.float64)
+    unique_ox, unique_oz = np.unique(origins_x), np.unique(origins_z)
+    n_uox, n_uoz = len(unique_ox), len(unique_oz)
+
+    group_lut = np.full((n_uox, n_uoz), -1, dtype=np.int32)
+    for gi, (ev, _) in enumerate(groups):
+        oi = int(np.argmin(np.abs(unique_ox - ev["origin_x"])))
+        fi = int(np.argmin(np.abs(unique_oz - ev["focus_m"])))
+        group_lut[oi, fi] = gi
+
+    # nearest lateral origin index for each image column
+    nearest_ox = np.argmin(np.abs(x_grid[:, np.newaxis] - unique_ox[np.newaxis, :]), axis=1).astype(np.int32)
+    # nearest focal-depth index for each image row
+    nearest_oz = np.argmin(np.abs(z_grid[:, np.newaxis] - unique_oz[np.newaxis, :]), axis=1).astype(np.int32)
+    # group_lut[nearest_ox] → (nx, n_uoz); index columns by nearest_oz → (nx, nz); transpose → (nz, nx)
+    nearest_group = group_lut[nearest_ox][:, nearest_oz].T
 
     for grp_idx, (ev, ev_list) in enumerate(groups):
         # Average RF over repeated acquisitions for the same TX position
@@ -291,10 +309,10 @@ def visualize(
     grid_size: tuple[int, int] = (300, 300),
     frame: int = 0,
 ) -> None:
-    all_files = sorted(data_dir.glob("DATA_*.mat"))
+    all_files = sorted(data_dir.rglob("DATA_*.mat"))
     mat_files = [f for f in all_files if "multifocal" in f.name.lower()]
     if not mat_files:
-        raise FileNotFoundError(f"No MultiFocal DATA_*.mat files in {data_dir}")
+        raise FileNotFoundError(f"No MultiFocal DATA_*.mat files under {data_dir}")
 
     n = len(mat_files)
     ncols = 3
@@ -319,7 +337,7 @@ def visualize(
                 extent=[x_mm[0], x_mm[-1], z_mm[-1], z_mm[0]],
                 aspect="equal",
             )
-            ax.set_title(f"MultiFocal — {fpath.stem[-15:]}", fontsize=8)
+            ax.set_title(f"{fpath.parent.name} — {fpath.stem[-15:]}", fontsize=8)
             ax.set_xlabel("Lateral (mm)", fontsize=7)
             ax.set_ylabel("Depth (mm)", fontsize=7)
         except Exception as exc:
@@ -350,7 +368,7 @@ def visualize(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--data-dir", type=Path, default=Path("data/rats/Rat1/exposed_liver/")
+        "--data-dir", type=Path, default=Path("data/rats/")
     )
     parser.add_argument("--out", type=Path, default=Path("figures/bmode_all.png"))
     parser.add_argument("--grid", type=int, default=300)
