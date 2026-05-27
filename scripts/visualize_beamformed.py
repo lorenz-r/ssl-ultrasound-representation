@@ -149,16 +149,22 @@ def _to_iq(rf: np.ndarray) -> np.ndarray:
 # ── transmit delay model ────────────────────────────────────────────────────────
 
 
-def _tx_delay_focused(xx, zz, tx_x, tx_z, c):
+def _tx_delay_focused(xx, zz, tx_x, tx_z, elem_x_active, c):
     """
-    Virtual-source model for a focused transmit.
+    Virtual-source transmit delay following the rtbf convention.
 
-    Above focus (zz < tx_z): converging wavefront, subtract distance.
-    Below focus (zz >= tx_z): diverging from virtual source, add distance.
+    t0 = max distance from any active TX element to the focus / c.
+    This is the time at which the converging wavefront arrives at the focus.
+    Using just tx_z/c (depth only) misses the lateral aperture contribution
+    and shifts the reconstructed image.
+
+    Above focus (zz < tx_z): converging wavefront, subtract distance from t0.
+    Below focus (zz >= tx_z): diverging from virtual source, add distance to t0.
     """
-    t_focus = tx_z / c
-    dist = np.sqrt((xx - tx_x) ** 2 + (zz - tx_z) ** 2)
-    return t_focus + np.where(zz >= tx_z, dist, -dist) / c
+    t0 = float(np.max(np.sqrt((elem_x_active - tx_x) ** 2 + tx_z ** 2))) / c
+    pv_z = zz - tx_z
+    pv_dist = np.sqrt((xx - tx_x) ** 2 + pv_z ** 2)
+    return np.copysign(pv_dist, pv_z) / c + t0
 
 
 # ── beamformer ──────────────────────────────────────────────────────────────────
@@ -249,10 +255,10 @@ def das_beamform(
         # Convert to analytic (IQ) signal along the depth axis
         iq_acq = _to_iq(rf_acq)  # (n_rx, n_samp) complex64
 
-        # Transmit delay — virtual-source model
+        # Transmit delay — virtual-source model (rtbf convention)
         tx_x = ev["origin_x"]
         tx_z = ev["focus_m"]
-        t_tx = _tx_delay_focused(xx, zz, tx_x, tx_z, c)
+        t_tx = _tx_delay_focused(xx, zz, tx_x, tx_z, elem_x[ev["active"]], c)
 
         # Float sample indices (enable linear interpolation)
         t_total = t_tx[np.newaxis] + t_rx  # (n_rx, nz, nx)
