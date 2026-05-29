@@ -1,28 +1,7 @@
 """
-PyMUST B-mode reconstruction of Verasonics MultiFocal ultrasound files.
-
-This dataset is a HVMux synthetic-aperture, multi-focal-zone acquisition:
-
-  * The probe has 192 physical elements but only 128 receive channels.
-  * Each scan line fires ONE focused transmit, recorded TWICE on two receive
-    sub-apertures (Receive.aperture 1 -> physical elements 0..127, and 65 ->
-    elements 64..191).  Combined, they synthesise a full 192-element receive
-    aperture (the 64..127 overlap is averaged).
-  * Each scan line is repeated at 3 transmit focus depths (multi-focal).
-  * Total events per frame = 192 scan lines x 3 focal zones x 2 receive halves.
-
-Beamforming strategy:
-  1. For every (scan line, focal zone) group, combine the two receive halves
-     into a 192-channel I/Q signal.
-  2. Beamform a lateral strip around the scan line with PyMUST's dasmtx
-     (validated delay-and-sum kernel, true first-arrival transmit model from
-     the actual focusing delays).
-  3. Compound scan lines laterally (Hann-weighted overlap) into a per-focal-zone
-     image, then stitch the focal zones along depth with a linear cross-fade.
-
 Usage:
-    poetry run python scripts/visualize_beamformed_pymust.py
-    poetry run python scripts/visualize_beamformed_pymust.py --data-dir data/rats --out figures/bmode_pymust.png
+    python scripts/visualize_beamformed_pymust.py
+    python scripts/visualize_beamformed_pymust.py --data-dir data/rats --out figures/bmode_pymust.png
 """
 
 from __future__ import annotations
@@ -215,7 +194,11 @@ def beamform_multifocal(
     Returns (log_img_dB[-50..0], x_grid_m, z_grid_m).
     """
     elem_x = meta["elem_x"]
-    z_end = meta["end_depth_m"] if max_depth_m is None else min(meta["end_depth_m"], max_depth_m)
+    z_end = (
+        meta["end_depth_m"]
+        if max_depth_m is None
+        else min(meta["end_depth_m"], max_depth_m)
+    )
     x_grid = np.linspace(elem_x[0], elem_x[-1], nx)
     z_grid = np.linspace(meta["start_depth_m"], z_end, nz)
 
@@ -230,7 +213,9 @@ def beamform_multifocal(
     param.fnumber = fnumber
 
     n_samp = meta["n_samp"]
-    sig_shape = 1j * np.array([n_samp, meta["n_elem"]])  # complex DAS matrix
+    iq_shape = 1j * np.array(
+        [n_samp, meta["n_elem"]]
+    )  # PyMUST IQ shape convention: imaginary flag signals complex input
 
     # focal zones (sorted by depth) for the axial cross-fade
     focal_depths = sorted({round(g["focus_m"], 6) for g in meta["groups"]})
@@ -252,11 +237,13 @@ def beamform_multifocal(
         delays = _tx_delays_192(group, meta)
 
         X, Z = np.meshgrid(xs, z_grid)  # (nz, n_strip)
-        M = pymust.dasmtx(sig_shape, X, Z, delays, param)
+        M = pymust.dasmtx(iq_shape, X, Z, delays, param)
         bf = (M @ iq192.flatten(order="F")).reshape(X.shape, order="F")
 
         # raised-cosine lateral apodisation centred on the scan line (smooth compounding)
-        w = (0.5 * (1.0 + np.cos(np.pi * (xs - ox) / strip_halfwidth_m))).astype(np.float32)
+        w = (0.5 * (1.0 + np.cos(np.pi * (xs - ox) / strip_halfwidth_m))).astype(
+            np.float32
+        )
         zone_imgs[fz][:, cols] += bf * w[np.newaxis, :]
         zone_wts[fz][:, cols] += w[np.newaxis, :]
 
@@ -266,19 +253,23 @@ def beamform_multifocal(
         np.divide(zone_imgs[fz], wt, out=zone_imgs[fz], where=wt > 0)
 
     # ── axial stitching: linear cross-fade between adjacent focal zones ──
-    final = np.zeros((nz, nx), dtype=np.complex64)
     fds = np.array(focal_depths)
-    for iz, z in enumerate(z_grid):
-        if z <= fds[0]:
-            wgt = {focal_depths[0]: 1.0}
-        elif z >= fds[-1]:
-            wgt = {focal_depths[-1]: 1.0}
-        else:
-            j = int(np.searchsorted(fds, z) - 1)  # bracketing zones j, j+1
-            t = (z - fds[j]) / (fds[j + 1] - fds[j])
-            wgt = {focal_depths[j]: 1.0 - t, focal_depths[j + 1]: t}
-        for fz, a in wgt.items():
-            final[iz, :] += a * zone_imgs[fz][iz, :]
+    n_fz = len(focal_depths)
+    zone_stack = np.stack([zone_imgs[fz] for fz in focal_depths])  # (n_fz, nz, nx)
+    w = np.zeros((n_fz, nz), dtype=np.float32)
+
+    below = z_grid <= fds[0]
+    above = z_grid >= fds[-1]
+    w[0, below] = 1.0
+    w[-1, above] = 1.0
+
+    mid = ~(below | above)
+    j = np.searchsorted(fds, z_grid[mid]) - 1
+    t = (z_grid[mid] - fds[j]) / (fds[j + 1] - fds[j])
+    np.add.at(w, (j, np.where(mid)[0]), 1.0 - t)
+    np.add.at(w, (j + 1, np.where(mid)[0]), t)
+
+    final = np.einsum("fz,fzx->zx", w, zone_stack)
 
     # ── time-gain compensation + log compression ──
     env = np.abs(final)
@@ -317,7 +308,11 @@ def visualize(
             meta = load_metadata(fpath)
             rf_raw = load_rf_frame(fpath, frame=frame)
             log_img, x_grid, z_grid = beamform_multifocal(
-                meta, rf_raw, nx=nx, nz=nz, scanline_step=scanline_step,
+                meta,
+                rf_raw,
+                nx=nx,
+                nz=nz,
+                scanline_step=scanline_step,
                 max_depth_m=max_depth_m,
             )
             ax.imshow(
@@ -325,7 +320,12 @@ def visualize(
                 cmap="gray",
                 vmin=-50,
                 vmax=0,
-                extent=[x_grid[0] * 1e3, x_grid[-1] * 1e3, z_grid[-1] * 1e3, z_grid[0] * 1e3],
+                extent=[
+                    x_grid[0] * 1e3,
+                    x_grid[-1] * 1e3,
+                    z_grid[-1] * 1e3,
+                    z_grid[0] * 1e3,
+                ],
                 aspect="equal",
             )
             ax.set_title(f"{fpath.parent.name} — {fpath.stem[-15:]}", fontsize=8)
@@ -335,13 +335,25 @@ def visualize(
             import traceback
 
             traceback.print_exc()
-            ax.text(0.5, 0.5, str(exc), ha="center", va="center",
-                    transform=ax.transAxes, fontsize=7, color="red")
+            ax.text(
+                0.5,
+                0.5,
+                str(exc),
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=7,
+                color="red",
+            )
 
     for ax in axes[n:]:
         ax.set_visible(False)
 
-    fig.suptitle("PyMUST DAS Beamformed B-mode (multi-focal, synthetic RX aperture)", fontsize=11, y=1.01)
+    fig.suptitle(
+        "PyMUST DAS Beamformed B-mode (multi-focal, synthetic RX aperture)",
+        fontsize=11,
+        y=1.01,
+    )
     fig.tight_layout()
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=150, bbox_inches="tight")
@@ -355,12 +367,27 @@ if __name__ == "__main__":
     parser.add_argument("--nx", type=int, default=256)
     parser.add_argument("--nz", type=int, default=384)
     parser.add_argument("--frame", type=int, default=0)
-    parser.add_argument("--scanline-step", type=int, default=1,
-                        help="Use every Nth scan line (>1 speeds up at the cost of lateral sampling).")
-    parser.add_argument("--max-depth-mm", type=float, default=25.0,
-                        help="Reconstruction depth cap in mm (this data has no echo below ~20mm). "
-                             "Pass 0 to use the full configured depth.")
+    parser.add_argument(
+        "--scanline-step",
+        type=int,
+        default=1,
+        help="Use every Nth scan line (>1 speeds up at the cost of lateral sampling).",
+    )
+    parser.add_argument(
+        "--max-depth-mm",
+        type=float,
+        default=25.0,
+        help="Reconstruction depth cap in mm (this data has no echo below ~20mm). "
+        "Pass 0 to use the full configured depth.",
+    )
     args = parser.parse_args()
     max_depth_m = None if args.max_depth_mm == 0 else args.max_depth_mm * 1e-3
-    visualize(args.data_dir, args.out, nx=args.nx, nz=args.nz,
-              frame=args.frame, scanline_step=args.scanline_step, max_depth_m=max_depth_m)
+    visualize(
+        args.data_dir,
+        args.out,
+        nx=args.nx,
+        nz=args.nz,
+        frame=args.frame,
+        scanline_step=args.scanline_step,
+        max_depth_m=max_depth_m,
+    )
