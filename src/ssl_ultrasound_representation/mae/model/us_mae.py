@@ -1,11 +1,10 @@
 import torch
 import torch.nn as nn
 
-from .linear_projection import LinearEncoder, LinearDecoder
 from .pos_encoding import get_sinusoidal_positional_encoding
 
 class SignalTransformerAutoencoder(nn.Module):
-    def __init__(self, original_channels=847, d_model=128, nhead=8, num_layers=4, dim_feedforward=512):
+    def __init__(self, original_channels=847, d_model=128, nhead=8, num_layers=4, dim_feedforward=512, patch_size=(847, 1)):
         """
         Args:
             original_channels (int): The original signal depth (847 in diagram).
@@ -16,10 +15,15 @@ class SignalTransformerAutoencoder(nn.Module):
         """
         super().__init__()
         
+        self.patch_size = patch_size
+
         # 1. Input Linear Projection (847 => 128)
         # We use a 1D convolution here as a clean way to project channels across a sequence
-        self.input_projection = LinearEncoder(in_channels=original_channels, 
-                                          out_channels=d_model)
+        self.input_projection = nn.Sequential(
+            nn.Linear(in_features=original_channels, out_features=d_model),
+            nn.LayerNorm(d_model),
+            nn.GELU() # Non-linearity after projection
+        )
         
         # 2. Transformer Block
         # Setting batch_first=True expects inputs of shape (Batch, Sequence, Features)
@@ -33,29 +37,34 @@ class SignalTransformerAutoencoder(nn.Module):
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
         # 3. Output Linear Projection (128 => 847)
-        self.output_projection = LinearDecoder(in_channels=d_model, 
-                                              out_channels=original_channels)
+        self.output_projection = nn.Linear(in_features=d_model, out_features=original_channels)
 
-    def forward(self, x, pos_embedding):
+    def forward(self, x, pos_embed_spatial, pos_embed_temporal):
         """
         Args:
-            x: Tensor of shape (Batch, 847, 110592)
-            pos_embedding: Tensor of shape (110592, 128)
-            
+            x: Tensor of shape (Batch, 847, 192, 576)
+            pos_embed_spatial: Tensor of shape (192, 128)
+            pos_embed_temporal: Tensor of shape (576, 128)
+
         Returns:
-            Reconstructed Tensor of shape (Batch, 847, 110592)
+            Reconstructed Tensor of shape (Batch, 847, 192, 576)
         """
-        # x is currently (Batch, Channels=847, Sequence=110592)
+        # x is currently (Batch, Sample=847, Channels=192, Sequence=576)
+        B, S, C, N = x.shape
         
         # Project down to embedding dimension: 847 -> 128
-        x = self.input_projection(x) # Shape becomes (Batch, 128, 110592)
-        
-        # Transformers expect sequence length in the middle dimension if batch_first=True
-        # Permute to: (Batch, Sequence=110592, Channels=128)
-        x = x.permute(0, 2, 1) 
+        x = self.patchify(x, patch_size=self.patch_size) # Shape becomes (Batch, Num_Patches, Sequence, Flatten_Patch_Size)
+        x = self.input_projection(x) # Shape becomes (Batch, Num_Patches, Sequence, d_model=128)
+
+        # Masking
+        ## TODO
         
         # Add positional embedding (broadcasted across the batch)
-        x = x + pos_embedding.unsqueeze(0).to(x.device)
+        pos_embed_spatial = pos_embed_spatial.view(1, num_patches, 1, D).to(x.device)
+        pos_embed_temporal = pos_embed_temporal.view(1, 1, N, D).to(x.device)
+        x = x + pos_embed_spatial + pos_embed_temporal
+
+        x = x.view(B, num_patches * N, D)
         
         # Pass through the Transformer block
         x = self.transformer(x) # Shape remains (Batch, 110592, 128)
@@ -65,5 +74,63 @@ class SignalTransformerAutoencoder(nn.Module):
         
         # Project back to original dimension: 128 -> 847
         x = self.output_projection(x) # Shape becomes (Batch, 847, 110592)
+        x = self.unpatchify(x, S, C, patch_size=self.patch_size)
         
+        return x
+
+    def patchify(self, x, patch_size=(847, 1)):
+        """
+        Args:
+            x: Tensor of shape (Batch, Sample=847, Channels=192, Sequence=576)
+            patch_size: Tuple indicating the size of each patch (Sample, Channels)
+        
+        Returns:
+            Tensor of shape (Batch, Num_Patches, Patch_Size)
+        """
+        B, S, C, N = x.shape
+        patch_S, patch_C = patch_size # (847, 1) for simple patching along the sample dimension
+
+        assert C % patch_C == 0, "Channels must be divisible by patch channel size"
+        # Ensure the input dimensions are divisible by the patch size, padding 0 otherswise
+        if S % patch_S != 0:
+            pad_S = patch_S - (S % patch_S)
+            x = nn.functional.pad(x, (0, 0, 0, 0, 0, pad_S)) # Pad along the sample dimension
+            S += pad_S
+
+        num_S = S // patch_S
+        num_C = C // patch_C
+
+        x = x.view(B, num_S, patch_S, num_C, patch_C, N)
+        x = x.permute(0, 1, 3, 5, 2, 4).contiguous()
+        x = x.view(B, num_S * num_C, N, patch_S * patch_C)
+        
+        return x
+
+    def unpatchify(self, x, original_S, original_C, patch_size=(847, 1)):
+        """
+        Args:
+            x: Tensor of shape (Batch, Num_Patches, Sequence, Patch_Size)
+            original_S: Original sample dimension (847)
+            original_C: Original channel dimension (847)
+            patch_size: Tuple indicating the size of each patch (Sample, Channels)
+        
+        Returns:
+            Tensor of shape (Batch, Sample=847, Channels=847, Sequence=110592)
+        """
+        B, num_patches, N, patch_dim = x.shape
+        patch_S, patch_C = patch_size
+
+        pad_S = 0 if original_S % patch_S == 0 else patch_S - (original_S % patch_S)
+        padded_S = original_S + pad_S
+        
+        num_S = padded_S // patch_S
+        num_C = original_C // patch_C
+
+        x = x.view(B, num_S, num_C, N, patch_S, patch_C)
+        x = x.permute(0, 1, 4, 2, 5, 3).contiguous()
+        x = x.view(B, padded_S, original_C, N)
+        
+        if pad_S > 0:
+            x = x[:, :original_S, :, :]
+
         return x
