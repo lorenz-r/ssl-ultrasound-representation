@@ -3,3 +3,4 @@ figures/
 scripts/matlab_scripts
 __pycache__/
 *.pyc
+CLAUDE.md
