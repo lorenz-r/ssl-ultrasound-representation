@@ -25,18 +25,18 @@ from typing import Any
 
 import h5py
 import numpy as np
+import pymust
 import zarr
 from numcodecs import Blosc
 from tqdm import tqdm
 
-# Reuse the *exact* processing primitives from the reference beamforming script
-# so the dataset matches the pipeline used elsewhere in the project.
+# Reuse the *exact* metadata parser from the reference beamforming script. The
+# RF read + sub-aperture combination are reimplemented below in a streaming
+# variant that never materialises the multi-GB per-frame RF buffer (the
+# reference `load_rf_frame` allocates ~2.4 GB float32 per call — fine for a
+# single visualisation, fatal on a memory-capped batch job).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from visualize_beamformed_pymust import (  # noqa: E402
-    _combine_rx_halves,
-    load_metadata,
-    load_rf_frame,
-)
+from visualize_beamformed_pymust import load_metadata  # noqa: E402
 
 # ── Fixed processing constants ──────────────────────────────────────────────────
 DEPTH_CUTOFF = 860           # fast-time samples kept (everything beyond is noise)
@@ -77,8 +77,40 @@ def file_grid(meta: dict) -> tuple[list[float], list[float]]:
 
 
 # ── Per-frame processing ────────────────────────────────────────────────────────
+def _combine_rx_halves_streaming(
+    group: dict, rcv_ds: Any, frame_idx: int, meta: dict
+) -> np.ndarray:
+    """
+    Memory-frugal twin of `visualize_beamformed_pymust._combine_rx_halves`.
+
+    Reads each receive-event slice (`n_ch × n_samp`, a few MB) directly from an
+    open h5py `RcvData` dataset instead of from a pre-materialised float32 copy
+    of the entire `(n_rx, total_samples)` per-frame buffer. The numerics, group
+    semantics, and `pymust.rf2iq` call are identical to the reference helper.
+    """
+    n_samp, n_elem, fs, fc = meta["n_samp"], meta["n_elem"], meta["fs"], meta["fc"]
+    iq192 = np.zeros((n_samp, n_elem), dtype=np.complex64)
+    count = np.zeros(n_elem, dtype=np.float32)
+
+    for ev_i, rx_ap in group["rx_events"]:
+        s = ev_i * n_samp
+        rf = rcv_ds[frame_idx, :, s : s + n_samp]  # h5py read; int16, (n_ch, n_samp)
+        if rf.shape[1] != n_samp:
+            continue
+        iq = pymust.rf2iq(rf.T.astype(np.float64), fs, fc)  # (n_samp, n_ch)
+        n_ch = iq.shape[1]
+        phys = (rx_ap - 1) + np.arange(n_ch)
+        valid = phys < n_elem
+        iq192[:, phys[valid]] += iq[:, valid]
+        count[phys[valid]] += 1.0
+
+    np.divide(iq192, count[np.newaxis, :], out=iq192, where=count[np.newaxis, :] > 0)
+    return iq192
+
+
 def process_frame(
-    rf_raw: np.ndarray,
+    filepath: Path,
+    frame_idx: int,
     meta: dict,
     origin_index: dict[float, int],
     focal_index: dict[float, int],
@@ -89,30 +121,34 @@ def process_frame(
     """
     Return one frame shaped (n_elem, n_sl, n_fz, 2, 215) float32.
 
+    Opens the .mat file via h5py and reads only the per-event RF slices each
+    group actually needs (a few MB total per group, ~2.4 GB avoided per frame).
     Per (scanline, focal-zone) group:
-        1. combine the two RX sub-apertures via the reference helper
-           (which internally runs pymust.rf2iq for IQ demodulation)
+        1. stream + combine the two RX sub-apertures (IQ demodulated by pymust.rf2iq)
         2. truncate fast-time axis at DEPTH_CUTOFF samples
         3. decimate by DOWNSAMPLE_FACTOR
         4. split complex into (I, Q) and place into the output grid
     """
     out = np.zeros((n_elem, n_sl, n_fz, 2, N_SAMPLES_OUT), dtype=np.float32)
-    for group in meta["groups"]:
-        sl_i = origin_index[round(group["origin_x"], 6)]
-        fz_i = focal_index[round(group["focus_m"], 6)]
+    with h5py.File(filepath, "r") as _f:
+        f: Any = _f
+        rcv = f[f["RcvData"][()].flat[0]]
+        for group in meta["groups"]:
+            sl_i = origin_index[round(group["origin_x"], 6)]
+            fz_i = focal_index[round(group["focus_m"], 6)]
 
-        iq = _combine_rx_halves(group, rf_raw, meta)  # (n_samp, n_elem) complex
+            iq = _combine_rx_halves_streaming(group, rcv, frame_idx, meta)
 
-        if iq.shape[0] < DEPTH_CUTOFF:
-            pad = np.zeros(
-                (DEPTH_CUTOFF - iq.shape[0], iq.shape[1]), dtype=iq.dtype
-            )
-            iq = np.vstack([iq, pad])
-        iq = iq[:DEPTH_CUTOFF, :][::DOWNSAMPLE_FACTOR, :]  # (215, n_elem)
+            if iq.shape[0] < DEPTH_CUTOFF:
+                pad = np.zeros(
+                    (DEPTH_CUTOFF - iq.shape[0], iq.shape[1]), dtype=iq.dtype
+                )
+                iq = np.vstack([iq, pad])
+            iq = iq[:DEPTH_CUTOFF, :][::DOWNSAMPLE_FACTOR, :]  # (215, n_elem)
 
-        iq_t = iq.T  # (n_elem, 215)
-        out[:, sl_i, fz_i, 0, :] = iq_t.real
-        out[:, sl_i, fz_i, 1, :] = iq_t.imag
+            iq_t = iq.T  # (n_elem, 215)
+            out[:, sl_i, fz_i, 0, :] = iq_t.real
+            out[:, sl_i, fz_i, 1, :] = iq_t.imag
     return out
 
 
@@ -223,9 +259,8 @@ def main() -> None:
                 frames_done_in_file = 0
                 for local_i in range(nf):
                     try:
-                        rf_raw = load_rf_frame(fp, frame=local_i)
                         frame_arr = process_frame(
-                            rf_raw, meta, origin_index, focal_index,
+                            fp, local_i, meta, origin_index, focal_index,
                             n_elem_ref, n_sl_ref, n_fz_ref,
                         )
                         arr[global_idx] = frame_arr
@@ -248,6 +283,10 @@ def main() -> None:
                         break
                 if file_ok:
                     written_files += 1
+                # Release this file's meta (groups[] holds numpy arrays); over
+                # 80+ files the cached metas would otherwise tie up ~100s of MB.
+                rec.pop("meta", None)
+                del meta
     finally:
         store.close()
 
