@@ -1,0 +1,11 @@
+h5py>=3.0
+matplotlib>=3.5
+numpy>=1.24
+pymust>=0.1.9,<0.2.0
+zarr>=2.18,<3
+numcodecs>=0.13,<0.16
+tqdm>=4.65
+huggingface_hub>=0.20
+# torch is consumed only by the PyTorch wrapper in src/dataset.py (lazy import).
+# Install the variant that matches your accelerator (CUDA / MPS / CPU).
+torch>=2.0
