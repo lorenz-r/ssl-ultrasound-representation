@@ -16,7 +16,7 @@ class FAIRSignalMAE(nn.Module):
                  grid_spatial=192,
                  grid_temporal=576):
         """
-        Authentic asymmetric Masked Autoencoder architecture completely aligned with FAIR's design.
+        Masked Autoencoder architecture aligned with FAIR's design.
         """
         super().__init__()
         
