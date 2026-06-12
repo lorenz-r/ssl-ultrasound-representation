@@ -1,60 +1,98 @@
 import torch
 import torch.nn as nn
 
+
 class SignalMAE(nn.Module):
-    def __init__(self, 
-                 original_channels=847, 
-                 embed_dim=128, 
-                 encoder_depth=4, 
+    """
+    Masked Autoencoder over raw IQ channel data (single focal zone).
+
+    Input is one frame with the focal-zone axis already selected:
+        (B, transducer, scanline, iq, sample)
+    tokenized into a (scanline, transducer_group, depth_window) grid: each
+    token holds a sub-aperture of `transducer_window` elements for one
+    lateral position and one axial window — patch shape
+    (iq, transducer_window, depth_window). Masking hides lateral, aperture
+    and axial blocks, so reconstruction requires cross-scanline (anatomy),
+    cross-aperture (receive coherence) and cross-depth structure.
+
+    Patches are embedded with a small CNN over (transducer, depth) instead
+    of a flat linear layer to keep parameters reasonable.
+    """
+
+    def __init__(self,
+                 n_transducers=192,
+                 transducer_window=64,
+                 n_scanlines=192,
+                 n_samples=215,
+                 depth_window=43,
+                 embed_dim=128,
+                 encoder_depth=4,
                  encoder_heads=8,
-                 decoder_embed_dim=64, 
-                 decoder_depth=2, 
+                 decoder_embed_dim=64,
+                 decoder_depth=2,
                  decoder_heads=4,
-                 dim_feedforward=512, 
-                 patch_size=(847, 1), 
-                 mask_ratio=0.75,
-                 grid_spatial=192,
-                 grid_temporal=576):
-        """
-        Masked Autoencoder architecture aligned with FAIR's design.
-        """
+                 dim_feedforward=512,
+                 mask_ratio=0.0):
         super().__init__()
-        
-        self.patch_size = patch_size
-        self.mask_ratio = mask_ratio
+        assert n_samples % depth_window == 0, (
+            f"n_samples ({n_samples}) must be divisible by depth_window ({depth_window})"
+        )
+        assert n_transducers % transducer_window == 0, (
+            f"n_transducers ({n_transducers}) must be divisible by "
+            f"transducer_window ({transducer_window})"
+        )
+
+        self.n_transducers = n_transducers
+        self.transducer_window = transducer_window
+        self.n_transducer_groups = n_transducers // transducer_window
+        self.n_scanlines = n_scanlines
+        self.n_samples = n_samples
+        self.depth_window = depth_window
+        self.n_depth_windows = n_samples // depth_window
+        self.num_tokens = (
+            n_scanlines * self.n_transducer_groups * self.n_depth_windows
+        )
+        self.patch_dim = 2 * transducer_window * depth_window
+
         self.embed_dim = embed_dim
         self.decoder_embed_dim = decoder_embed_dim
+        self.mask_ratio = mask_ratio
 
         # -------------------------------------------------------------------------
         # 1. MAE ENCODER MODULES
         # -------------------------------------------------------------------------
-        self.input_projection = nn.Sequential(
-            nn.Linear(in_features=original_channels, out_features=embed_dim),
-            nn.GELU()
+        # Conv patch embedder over (transducer_window, depth_window), IQ as channels.
+        self.patch_conv = nn.Sequential(
+            nn.Conv2d(2, 16, kernel_size=5, stride=2, padding=2),
+            nn.GELU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.GELU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.GELU(),
         )
-        
+        with torch.no_grad():
+            feat = self.patch_conv(torch.zeros(1, 2, transducer_window, depth_window))
+        self.patch_proj = nn.Linear(feat.flatten(1).shape[1], embed_dim)
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=encoder_heads,
             dim_feedforward=dim_feedforward,
             activation="gelu",
             batch_first=True,
-            norm_first=True  # Fix 3: Pre-LN for training stability
+            norm_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_depth)
-        self.encoder_norm = nn.LayerNorm(embed_dim)  # Fix 1 & 6: Final encoder norm
+        self.encoder_norm = nn.LayerNorm(embed_dim)
 
         # -------------------------------------------------------------------------
         # 2. MAE DECODER MODULES (Asymmetric & Lightweight)
         # -------------------------------------------------------------------------
         self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim)
-        
-        # Fix 5: Mask token initialized to zeros per FAIR paper
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, decoder_embed_dim))
-        
-        # Fix 4: Decoupled Decoder Positional Embeddings
-        self.decoder_pos_embed_spatial = nn.Parameter(torch.randn(1, grid_spatial, 1, decoder_embed_dim) * 0.02)
-        self.decoder_pos_embed_temporal = nn.Parameter(torch.randn(1, 1, grid_temporal, decoder_embed_dim) * 0.02)
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
+        self.decoder_pos_embed = nn.Parameter(
+            torch.randn(1, self.num_tokens, decoder_embed_dim) * 0.02
+        )
 
         decoder_layer = nn.TransformerEncoderLayer(
             d_model=decoder_embed_dim,
@@ -62,146 +100,106 @@ class SignalMAE(nn.Module):
             dim_feedforward=dim_feedforward,
             activation="gelu",
             batch_first=True,
-            norm_first=True  # Fix 3: Pre-LN for decoder blocks
+            norm_first=True,
         )
         self.decoder = nn.TransformerEncoder(decoder_layer, num_layers=decoder_depth)
-        self.decoder_norm = nn.LayerNorm(decoder_embed_dim)  # Fix 2 & 6: Final decoder norm
-        
-        self.output_projection = nn.Linear(in_features=decoder_embed_dim, out_features=original_channels)
+        self.decoder_norm = nn.LayerNorm(decoder_embed_dim)
 
-        # Initialize mask token and learned embeddings cleanly
-        self.initialize_weights()
+        self.output_projection = nn.Linear(decoder_embed_dim, self.patch_dim)
 
-    def initialize_weights(self):
-        """Initialize mask token to zero, matching the FAIR MAE paper specification."""
-        torch.nn.init.constant_(self.mask_token, 0.)
-
-    def forward(self, x, pos_embed_spatial, pos_embed_temporal):
+    def forward(self, x, pos_embed):
         """
         Args:
-            x: Tensor of shape (Batch, 847, 192, 576)
-            pos_embed_spatial: Encoder Spatial PE Tensor of shape (192, 128)
-            pos_embed_temporal: Encoder Temporal PE Tensor of shape (576, 128)
+            x: frame batch (B, transducer, scanline, iq, sample),
+               single focal zone already selected.
+            pos_embed: encoder positional encoding (num_tokens, embed_dim),
+               token order (scanline, transducer_group, depth_window) row-major.
+
+        Returns:
+            pred:   (B, num_tokens, patch_dim) reconstructed patches
+            target: (B, num_tokens, patch_dim) ground-truth patches
+            mask:   (B, num_tokens) — 1 where the token was masked, 0 visible
         """
-        B, S, C, N = x.shape
-        
-        # --- 1. Patchify & Embed ---
-        x = self.patchify(x, patch_size=self.patch_size) 
-        x = self.input_projection(x) 
+        patches = self.patchify(x)  # (B, L, 2, tw, w)
+        B, L = patches.shape[:2]
+        target = patches.flatten(2)
 
-        B, P, N, D = x.shape
+        # --- 1. Patch embedding (conv) + positional encoding ---
+        tok = self.patch_conv(
+            patches.reshape(B * L, 2, self.transducer_window, self.depth_window)
+        )
+        tok = self.patch_proj(tok.flatten(1)).view(B, L, self.embed_dim)
+        tok = tok + pos_embed.unsqueeze(0).to(tok.dtype)
 
-        # --- 2. Calculate Encoder Positional Embeddings ---
-        pos_embed_spatial = pos_embed_spatial.view(1, P, 1, D).to(x.device)
-        pos_embed_temporal = pos_embed_temporal.view(1, 1, N, D).to(x.device)
-        pe_encoder = pos_embed_spatial + pos_embed_temporal 
+        # --- 2. Random masking over the token grid ---
+        tok, mask, ids_restore, len_keep = self.random_masking(tok, self.mask_ratio)
 
-        # Add positional embedding to the full sequence before slicing out visible ones
-        x = x + pe_encoder
+        # --- 3. ENCODER (visible tokens only) ---
+        z = self.encoder_norm(self.encoder(tok))
 
-        # --- 3. Masking (Keep only a fraction of the patches) ---
-        x_masked, ids_restore, len_keep = self.spatial_tube_masking(x, self.mask_ratio)
+        # --- 4. Project to decoder space, re-insert mask tokens ---
+        y = self.decoder_embed(z)
+        if len_keep < L:
+            mask_tokens = self.mask_token.expand(B, L - len_keep, -1)
+            y = torch.cat([y, mask_tokens], dim=1)
+            y = torch.gather(
+                y, 1,
+                ids_restore.unsqueeze(-1).expand(-1, -1, self.decoder_embed_dim),
+            )
+        y = y + self.decoder_pos_embed
 
-        # --- 4. Pass through ENCODER ---
-        x_masked = x_masked.view(B, len_keep * N, D)
-        x_encoded = self.encoder(x_masked) 
-        x_encoded = self.encoder_norm(x_encoded)  # Added final layer norm
-        x_encoded = x_encoded.view(B, len_keep, N, D)
+        # --- 5. DECODER + output projection ---
+        y = self.decoder_norm(self.decoder(y))
+        pred = self.output_projection(y)
 
-        # --- 5. Project to Decoder Space ---
-        x_decoder_input = self.decoder_embed(x_encoded) 
+        return pred, target, mask
 
-        # --- 6. Unshuffle & Append Mask Tokens ---
-        x_full = self.spatial_tube_unshuffle(x_decoder_input, ids_restore, len_keep) 
-
-        # --- 7. Add Decoupled Decoder Positional Embeddings ---
-        # No longer projecting encoder PE, using dedicated decoder parameters
-        pe_decoder = self.decoder_pos_embed_spatial + self.decoder_pos_embed_temporal
-        x_full = x_full + pe_decoder
-
-        # --- 8. Pass through DECODER ---
-        x_full = x_full.view(B, P * N, self.decoder_embed_dim)
-        x_decoded = self.decoder(x_full)
-        x_decoded = self.decoder_norm(x_decoded)  # Fix 2 & 6: Added final layer norm
-        x_decoded = x_decoded.view(B, P, N, self.decoder_embed_dim)
-        
-        # --- 9. Output Projection & Unpatchify ---
-        x_out = self.output_projection(x_decoded) 
-        x_final = self.unpatchify(x_out, S, C, patch_size=self.patch_size)
-        
-        return x_final, ids_restore, len_keep
-
-    def patchify(self, x, patch_size=(847, 1)):
+    def patchify(self, x):
         """
-        Split signal into non-overlapping patches along spatial and channel dimensions.
+        (B, T, Sc, IQ, D) -> (B, Sc*G*W, IQ, tw, w)
+        with T = G * tw (transducer groups) and D = W * w (depth windows).
 
-        Input (B, S, C, N) is reshaped into (B, num_S * num_C, N, patch_S * patch_C)
-        where each patch groups a (patch_S, patch_C) block. Pads S if needed.
+        Token order is (scanline, transducer_group, depth_window) row-major,
+        matching the positional-encoding grid.
         """
-        B, S, C, N = x.shape
-        patch_S, patch_C = patch_size
-        assert C % patch_C == 0, "Channels must be divisible by patch channel size"
-        if S % patch_S != 0:
-            pad_S = patch_S - (S % patch_S)
-            x = nn.functional.pad(x, (0, 0, 0, 0, 0, pad_S))
-            S += pad_S
-        num_S = S // patch_S
-        num_C = C // patch_C
-        x = x.view(B, num_S, patch_S, num_C, patch_C, N)
-        x = x.permute(0, 1, 3, 5, 2, 4).contiguous()
-        x = x.view(B, num_S * num_C, N, patch_S * patch_C)
-        return x
+        B, T, Sc, IQ, D = x.shape
+        G, tw = self.n_transducer_groups, self.transducer_window
+        W, w = self.n_depth_windows, self.depth_window
+        x = x.view(B, G, tw, Sc, IQ, W, w)
+        x = x.permute(0, 3, 1, 5, 4, 2, 6).contiguous()
+        return x.view(B, Sc * G * W, IQ, tw, w)
 
-    def unpatchify(self, x, original_S, original_C, patch_size=(847, 1)):
-        """
-        Reverse of patchify: reassemble patches back into the original signal layout.
+    def unpatchify(self, pred):
+        """(B, L, patch_dim) -> (B, T, Sc, IQ, D); inverse of patchify."""
+        B = pred.shape[0]
+        Sc = self.n_scanlines
+        G, tw = self.n_transducer_groups, self.transducer_window
+        W, w = self.n_depth_windows, self.depth_window
+        x = pred.view(B, Sc, G, W, 2, tw, w)
+        x = x.permute(0, 2, 5, 1, 4, 3, 6).contiguous()
+        return x.view(B, G * tw, Sc, 2, W * w)
 
-        Input (B, num_patches, N, patch_dim) is reshaped back to (B, original_S, original_C, N).
-        Any padding added during patchify is removed to restore the exact original dimensions.
+    def random_masking(self, x, mask_ratio):
         """
-        B, num_patches, N, patch_dim = x.shape
-        patch_S, patch_C = patch_size
-        pad_S = 0 if original_S % patch_S == 0 else patch_S - (original_S % patch_S)
-        padded_S = original_S + pad_S
-        num_S = padded_S // patch_S
-        num_C = original_C // patch_C
-        x = x.view(B, num_S, num_C, N, patch_S, patch_C)
-        x = x.permute(0, 1, 4, 2, 5, 3).contiguous()
-        x = x.view(B, padded_S, original_C, N)
-        if pad_S > 0:
-            x = x[:, :original_S, :, :]
-        return x
+        Standard MAE per-token random masking.
 
-    def spatial_tube_masking(self, x, mask_ratio):
+        Returns the kept tokens, a (B, L) binary mask (1 = masked), restore
+        indices, and the number of kept tokens. With mask_ratio <= 0 the
+        sequence passes through untouched (plain autoencoder).
         """
-        Randomly mask entire spatial tubes across all temporal frames.
+        B, L, D = x.shape
+        if mask_ratio <= 0:
+            mask = torch.zeros(B, L, device=x.device)
+            ids_restore = torch.arange(L, device=x.device).unsqueeze(0).expand(B, -1)
+            return x, mask, ids_restore, L
 
-        For each sample, shuffles patches along the spatial dimension P, keeps
-        the first len_keep patches, and discards the rest. Returns the kept
-        patches, restore indices to undo the shuffle, and the number kept.
-        """
-        B, P, N, D = x.shape
-        len_keep = int(P * (1 - mask_ratio))
-        noise = torch.rand(B, P, device=x.device)
+        len_keep = max(1, int(L * (1 - mask_ratio)))
+        noise = torch.rand(B, L, device=x.device)
         ids_shuffle = torch.argsort(noise, dim=1)
         ids_restore = torch.argsort(ids_shuffle, dim=1)
         ids_keep = ids_shuffle[:, :len_keep]
-        expanded_ids_keep = ids_keep.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, N, D)
-        x_masked = torch.gather(x, dim=1, index=expanded_ids_keep)
-        return x_masked, ids_restore, len_keep
-
-    def spatial_tube_unshuffle(self, x_encoded, ids_restore, len_keep):
-        """
-        Restore the full patch sequence by inserting learned mask tokens at masked positions.
-
-        Concatenates encoded visible patches with mask tokens, then uses ids_restore
-        to permute them back to the original patch ordering. The decoder processes
-        this full-length sequence.
-        """
-        B, _, N, D = x_encoded.shape
-        P = ids_restore.shape[1]
-        mask_tokens = self.mask_token.expand(B, P - len_keep, N, D)
-        x_full = torch.cat([x_encoded, mask_tokens], dim=1)
-        expanded_ids_restore = ids_restore.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, N, D)
-        x_restored = torch.gather(x_full, dim=1, index=expanded_ids_restore)
-        return x_restored
+        x_masked = torch.gather(x, 1, ids_keep.unsqueeze(-1).expand(-1, -1, D))
+        mask = torch.ones(B, L, device=x.device)
+        mask[:, :len_keep] = 0
+        mask = torch.gather(mask, 1, ids_restore)
+        return x_masked, mask, ids_restore, len_keep

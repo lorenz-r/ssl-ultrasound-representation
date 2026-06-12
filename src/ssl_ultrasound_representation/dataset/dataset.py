@@ -256,9 +256,8 @@ class UltrasoundMAEDataset:
         dtype: Any = None,  # torch.float32 by default
         transform: Callable | None = None,
     ):
-        import torch  # noqa: F401 — required, deferred to keep the module torch-free
+        import torch
 
-        self._torch = torch
         self.arr = arr
         self.indices = (
             list(range(arr.shape[0])) if indices is None else list(indices)
@@ -272,7 +271,8 @@ class UltrasoundMAEDataset:
     def __getitem__(self, i: int):
         global_idx = self.indices[i]
         frame = self.arr[global_idx]  # numpy ndarray
-        tensor = self._torch.from_numpy(frame).to(self.dtype)
+        import torch
+        tensor = torch.from_numpy(frame).to(self.dtype)
         if self.transform is not None:
             tensor = self.transform(tensor)
         return tensor
