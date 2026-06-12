@@ -65,6 +65,7 @@ def train(config: dict | None = None) -> dict:
 
     # Data source: HF dataset repo (cluster) or local zarr.zip (default)
     hf_repo = config.get("hf_repo")
+    max_frames = config.get("max_frames")  # HF only: fetch just the first N frames
     data_zip = config.get("data_zip", "data/processed/ultrasonic_dataset.zarr.zip")
     data_metadata = config.get(
         "data_metadata", "data/processed/ultrasonic_dataset.metadata.json"
@@ -111,7 +112,7 @@ def train(config: dict | None = None) -> dict:
     # no test set for now; transform keeps focal zone 0 and standardizes.
     # ------------------------------------------------------------------
     data_source = (
-        {"repo_id": hf_repo} if hf_repo
+        {"repo_id": hf_repo, "max_frames": max_frames} if hf_repo
         else {"local_zip": data_zip, "local_metadata": data_metadata}
     )
     splits, meta = build_split_datasets(
@@ -311,6 +312,9 @@ def _cli() -> dict:
     parser.add_argument("--hf-repo", dest="hf_repo",
                         help="HF dataset repo id (e.g. user/ssl-ultrasound-rats); "
                              "falls back to local data/processed/ files if omitted.")
+    parser.add_argument("--max-frames", type=int, dest="max_frames",
+                        help="With --hf-repo: download/use only the first N frames "
+                             "(quick smoke tests without the full ~30 GB fetch).")
     parser.add_argument("--data-zip", dest="data_zip")
     parser.add_argument("--data-metadata", dest="data_metadata")
     parser.add_argument("--beamform-params", dest="beamform_params")

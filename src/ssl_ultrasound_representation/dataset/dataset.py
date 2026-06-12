@@ -2,19 +2,26 @@
 HuggingFace-backed dataset loader for the aggregated MultiFocal ultrasound zarr.
 
 The companion build script (`scripts/dataset_scripts/build_mae_dataset.py`)
-produces two artefacts:
-  * `ultrasonic_dataset.zarr.zip` — 6D float32 array
+produces a local `ultrasonic_dataset.zarr.zip` + `ultrasonic_dataset.metadata.json`;
+the push script (`scripts/dataset_scripts/push_to_hf.py`) unpacks the zip and
+uploads the zarr as an *unzipped directory tree* (one file per chunk) so that
+clients can fetch only the chunks they actually need:
+  * `ultrasonic_dataset.zarr/` — 6D float32 array exploded into per-chunk files
     `(frames, transducers, scanlines, focal_zones, 2, samples)`
   * `ultrasonic_dataset.metadata.json` — per-frame provenance
 
-This module downloads them once from a HuggingFace dataset repo (cached on
-local SSD, not `$HOME`), exposes a raw `(zarr.Array, metadata)` handle for
-notebooks / EDA, and provides leakage-safe splits + a thin `torch.utils.data.
-Dataset` wrapper for SSL training.
+Because the leading (frame) axis is chunked one-frame-per-chunk, this module can
+download just the chunks for the first `max_frames` frames instead of the whole
+array — handy for quick experiments on a memory/disk-capped box. The files are
+cached on local SSD (not `$HOME`); the module exposes a raw `(zarr.Array,
+metadata)` handle for notebooks / EDA, and provides leakage-safe splits + a thin
+`torch.utils.data.Dataset` wrapper for SSL training.
 
 Typical usage:
-    from src.dataset import build_split_datasets
-    splits, meta = build_split_datasets("user/repo", split_strategy="subject")
+    from ssl_ultrasound_representation.dataset import build_split_datasets
+    splits, meta = build_split_datasets(
+        "user/repo", split_strategy="subject", max_frames=16
+    )
     train_ds = splits["train"]
 """
 
@@ -29,9 +36,10 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 import zarr
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
 
-DEFAULT_ZARR_FILENAME = "ultrasonic_dataset.zarr.zip"
+DEFAULT_ZARR_FILENAME = "ultrasonic_dataset.zarr.zip"  # local build artefact (zipped)
+DEFAULT_ZARR_DIRNAME = "ultrasonic_dataset.zarr"       # path_in_repo on HF (unzipped tree)
 DEFAULT_METADATA_FILENAME = "ultrasonic_dataset.metadata.json"
 DEFAULT_ARRAY_NAME = "rf_iq"
 DEFAULT_CACHE_DIR = "/tmp/hf_cache"
@@ -59,25 +67,41 @@ def _open_zarr_array(
     return group[array_name]
 
 
+def _open_zarr_dir_array(
+    zarr_dir: str | os.PathLike, array_name: str = DEFAULT_ARRAY_NAME
+) -> zarr.Array:
+    store = zarr.DirectoryStore(str(zarr_dir))
+    group = zarr.open_group(store=store, mode="r")
+    return group[array_name]
+
+
 def load_dataset(
     repo_id: str,
     *,
     revision: str | None = None,
     cache_dir: str | os.PathLike | None = None,
-    zarr_filename: str = DEFAULT_ZARR_FILENAME,
+    zarr_dirname: str = DEFAULT_ZARR_DIRNAME,
     metadata_filename: str = DEFAULT_METADATA_FILENAME,
     array_name: str = DEFAULT_ARRAY_NAME,
     repo_type: str = "dataset",
+    max_frames: int | None = None,
 ) -> tuple[zarr.Array, dict]:
-    """Download both artefacts from a HF repo (cached locally) and open them."""
+    """
+    Download the zarr (as a per-chunk directory tree) + metadata from a HF repo
+    and open the array.
+
+    When `max_frames` is set, only the chunks belonging to the first `max_frames`
+    frames are fetched (plus the structural `.zarray`/`.zgroup` files), so the
+    whole dataset is never materialised on disk. The returned `metadata` is
+    trimmed to the loaded frames (its `frames` list and a new `n_frames_loaded`
+    key reflect the cap), keeping the split helpers leakage-safe and bounded to
+    what is actually available locally. Frames beyond the cap remain part of the
+    array's declared shape but read back as the zarr fill value (0.0).
+    """
     cache_root = resolve_cache_dir(cache_dir)
-    zip_path = hf_hub_download(
-        repo_id=repo_id,
-        filename=zarr_filename,
-        revision=revision,
-        cache_dir=str(cache_root),
-        repo_type=repo_type,
-    )
+
+    # Metadata first: it tells us the total frame count and lets us build the
+    # per-frame chunk globs before pulling any (potentially large) chunk files.
     meta_path = hf_hub_download(
         repo_id=repo_id,
         filename=metadata_filename,
@@ -85,8 +109,42 @@ def load_dataset(
         cache_dir=str(cache_root),
         repo_type=repo_type,
     )
-    arr = _open_zarr_array(zip_path, array_name=array_name)
     metadata = json.loads(Path(meta_path).read_text())
+    n_total = int(metadata["shape"][0])
+
+    array_prefix = f"{zarr_dirname}/{array_name}"
+    if max_frames is None:
+        n_load = n_total
+        allow_patterns = [f"{zarr_dirname}/*"]
+    else:
+        n_load = max(0, min(int(max_frames), n_total))
+        # The frame axis is chunked one-frame-per-chunk, so the leading chunk
+        # index of every chunk for frame `f` is exactly `f` (e.g. `f.0.0.0.0.0`,
+        # `f.1.2.0.0.0`, …). `{f}.*` selects all of that frame's spatial chunks.
+        allow_patterns = [
+            f"{zarr_dirname}/.zgroup",
+            f"{zarr_dirname}/.zattrs",
+            f"{array_prefix}/.zarray",
+            f"{array_prefix}/.zattrs",
+            *(f"{array_prefix}/{f}.*" for f in range(n_load)),
+        ]
+
+    snapshot_dir = snapshot_download(
+        repo_id=repo_id,
+        repo_type=repo_type,
+        revision=revision,
+        cache_dir=str(cache_root),
+        allow_patterns=allow_patterns,
+    )
+    arr = _open_zarr_dir_array(Path(snapshot_dir) / zarr_dirname, array_name=array_name)
+
+    if max_frames is not None and n_load < n_total:
+        metadata = dict(metadata)
+        metadata["frames"] = [
+            f for f in metadata.get("frames", [])
+            if f["global_frame_index"] < n_load
+        ]
+        metadata["n_frames_loaded"] = n_load
     return arr, metadata
 
 
@@ -240,7 +298,7 @@ def split_by_file(
 # ── PyTorch wrapper (lazy torch import) ───────────────────────────────────────
 class UltrasoundMAEDataset:
     """
-    PyTorch Dataset returning one beamformed frame per item.
+    PyTorch Dataset returning one IQ-demodulated (unbeamformed) frame per item.
 
     Item shape: `(transducers, scanlines, focal_zones, 2, samples)` — the full
     per-frame 5D layout from the aggregator (the leading frame axis is indexed).
@@ -256,8 +314,9 @@ class UltrasoundMAEDataset:
         dtype: Any = None,  # torch.float32 by default
         transform: Callable | None = None,
     ):
-        import torch
+        import torch  # noqa: F401 — required, deferred to keep the module torch-free
 
+        self._torch = torch
         self.arr = arr
         self.indices = (
             list(range(arr.shape[0])) if indices is None else list(indices)
@@ -271,8 +330,7 @@ class UltrasoundMAEDataset:
     def __getitem__(self, i: int):
         global_idx = self.indices[i]
         frame = self.arr[global_idx]  # numpy ndarray
-        import torch
-        tensor = torch.from_numpy(frame).to(self.dtype)
+        tensor = self._torch.from_numpy(frame).to(self.dtype)
         if self.transform is not None:
             tensor = self.transform(tensor)
         return tensor
@@ -288,6 +346,7 @@ def build_split_datasets(
     cache_dir: str | os.PathLike | None = None,
     revision: str | None = None,
     transform: Callable | None = None,
+    max_frames: int | None = None,
     **split_kwargs,
 ) -> tuple[dict[str, UltrasoundMAEDataset], dict]:
     """
@@ -296,11 +355,22 @@ def build_split_datasets(
     Either pass `repo_id` (HF dataset repo) OR both `local_zip` and `local_metadata`
     (for testing against a local build before any upload).
 
+    `max_frames` (HF path only) caps how many frames are downloaded/opened — only
+    those frames' chunks are fetched, and the splits are restricted to them.
+
     Extra kwargs are forwarded to the chosen split function.
     """
     if repo_id is not None:
-        arr, meta = load_dataset(repo_id, revision=revision, cache_dir=cache_dir)
+        arr, meta = load_dataset(
+            repo_id, revision=revision, cache_dir=cache_dir, max_frames=max_frames
+        )
     elif local_zip is not None and local_metadata is not None:
+        if max_frames is not None:
+            warnings.warn(
+                "max_frames is ignored when loading from a local zip "
+                "(the whole array is already on disk).",
+                stacklevel=2,
+            )
         arr, meta = load_local_dataset(local_zip, local_metadata)
     else:
         raise ValueError(
