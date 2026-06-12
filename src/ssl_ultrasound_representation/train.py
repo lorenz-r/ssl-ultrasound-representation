@@ -15,6 +15,7 @@ from ssl_ultrasound_representation.mae.model.pos_encoding import (
     build_grid_positional_encoding,
 )
 from ssl_ultrasound_representation.dataset import build_split_datasets
+from ssl_ultrasound_representation.utils.monitoring import TrainingMonitor
 
 
 def normalize_frame(t: torch.Tensor) -> torch.Tensor:
@@ -53,6 +54,16 @@ def train(config: dict | None = None) -> dict:
     mask_ratio = config.get("mask_ratio", 0.0)  # 0.0 = plain autoencoder
     loss_on = config.get("loss_on", "all")  # "all" keeps every patch supervised
     save_checkpoints = config.get("save_checkpoints", False)
+
+    # Monitoring
+    use_wandb = config.get("use_wandb", True)
+    wandb_project = config.get("wandb_project", "ssl-ultrasound-mae")
+    run_name = config.get("run_name")
+    vis_every = config.get("vis_every", 10)  # beamformed snapshot cadence (epochs)
+    n_vis_frames = config.get("n_vis_frames", 2)
+    beamform_params = config.get(
+        "beamform_params", "data/processed/beamform_params.json"
+    )
 
     # Data dimensions: zarr layout (frame, transducer, scanline, focal_zone, iq, sample);
     # only the first focal zone is used (selected in preprocess_frame).
@@ -126,6 +137,43 @@ def train(config: dict | None = None) -> dict:
     print(f"Device: {device}")
 
     # ------------------------------------------------------------------
+    # Monitoring (wandb + beamformed reconstruction snapshots)
+    # ------------------------------------------------------------------
+    monitor = TrainingMonitor(
+        config={
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "epochs": epochs,
+            "warmup_epochs": warmup_epochs,
+            "batch_size": batch_size,
+            "grad_clip": grad_clip,
+            "mask_ratio": mask_ratio,
+            "loss_on": loss_on,
+            "depth_window": depth_window,
+            "transducer_window": transducer_window,
+            "embed_dim": embed_dim,
+            "num_tokens": model.num_tokens,
+            "patch_dim": model.patch_dim,
+            "model_params": sum(p.numel() for p in model.parameters()),
+            "train_samples": len(splits["train"]),
+            "val_samples": len(splits["val"]),
+            "device": device,
+        },
+        enabled=use_wandb,
+        project=wandb_project,
+        run_name=run_name,
+        beamform_params=beamform_params,
+    )
+
+    # Fixed snapshot frames from the val split (fall back to train if empty)
+    vis_source = splits["val"] if len(splits["val"]) > 0 else splits["train"]
+    vis_idx = sorted({0, len(vis_source) // 2})[:n_vis_frames]
+    monitor.set_vis_frames(
+        torch.stack([vis_source[i] for i in vis_idx]),
+        [f"val[{i}]" if len(splits["val"]) else f"train[{i}]" for i in vis_idx],
+    )
+
+    # ------------------------------------------------------------------
     # Optimiser + LR schedule (linear warmup -> cosine decay, per step)
     # ------------------------------------------------------------------
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -153,11 +201,12 @@ def train(config: dict | None = None) -> dict:
     for epoch in range(1, epochs + 1):
         model.train()
         train_loss = 0.0
+        grad_norm_sum = 0.0
         train_batches = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
         for batch in pbar:
-            # batch: (B, transducer, scanline, focal_zone, iq, sample)
+            # batch: (B, transducer, scanline, iq, sample) — preprocessed
             x = batch.to(device, non_blocking=True)
 
             optimizer.zero_grad()
@@ -165,11 +214,12 @@ def train(config: dict | None = None) -> dict:
             loss = calculate_loss(pred, target, mask, loss_on=loss_on)
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
             scheduler.step()
 
             train_loss += loss.item()
+            grad_norm_sum += grad_norm.item()
             train_batches += 1
             pbar.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0])
 
@@ -199,6 +249,18 @@ def train(config: dict | None = None) -> dict:
             f"lr: {scheduler.get_last_lr()[0]:.2e}"
         )
 
+        monitor.log_epoch(
+            epoch,
+            {
+                "train/loss": avg_train_loss,
+                "val/loss": avg_val_loss,
+                "train/lr": scheduler.get_last_lr()[0],
+                "train/grad_norm": grad_norm_sum / max(train_batches, 1),
+            },
+        )
+        if epoch == 1 or epoch % vis_every == 0 or epoch == epochs:
+            monitor.log_reconstructions(epoch, model, pos_embed, device)
+
         # ------------------------------------------------------------------
         # Checkpoint
         # ------------------------------------------------------------------
@@ -217,6 +279,7 @@ def train(config: dict | None = None) -> dict:
                     "checkpoints/best_mae_checkpoint.pt",
                 )
 
+    monitor.finish(summary={"best_val_loss": best_val_loss})
     print(f"Training complete. Best val loss: {best_val_loss:.6f}")
     return {"best_val_loss": best_val_loss}
 

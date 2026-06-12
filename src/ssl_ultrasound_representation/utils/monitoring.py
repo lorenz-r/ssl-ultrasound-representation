@@ -1,0 +1,148 @@
+"""
+Weights & Biases monitoring for MAE training.
+
+`TrainingMonitor` centralises all experiment tracking:
+  * scalar metrics per epoch (losses, learning rate, gradient norm)
+  * periodic beamformed reconstruction snapshots: model output vs. ground
+    truth B-mode (PyMUST DAS), plus their dB difference
+
+Everything degrades gracefully: if wandb is unavailable / disabled or the
+beamform geometry file is missing, training proceeds without logging.
+
+Authentication: run `wandb login` once, or set WANDB_API_KEY (preferred on
+the cluster). Never commit the key.
+"""
+
+from __future__ import annotations
+
+import warnings
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+from .beamform import ZoneBeamformer
+
+
+class TrainingMonitor:
+    def __init__(
+        self,
+        config: dict,
+        enabled: bool = True,
+        project: str = "ssl-ultrasound-mae",
+        run_name: str | None = None,
+        beamform_params: str = "data/processed/beamform_params.json",
+        focal_zone: int = 0,
+    ):
+        self.run = None
+        self._wandb = None
+        if enabled:
+            try:
+                import wandb
+
+                self.run = wandb.init(
+                    project=project, name=run_name, config=config
+                )
+                self._wandb = wandb
+            except Exception as exc:  # offline cluster node, bad key, ...
+                warnings.warn(f"wandb disabled ({exc}); training continues unlogged.")
+
+        self._beamformer: ZoneBeamformer | None = None
+        if Path(beamform_params).exists():
+            self._beamformer = ZoneBeamformer(beamform_params, focal_zone=focal_zone)
+        else:
+            warnings.warn(
+                f"{beamform_params} not found — reconstruction snapshots disabled. "
+                "Generate it with scripts/dataset_scripts/export_beamform_params.py."
+            )
+
+        # Fixed vis frames (set via set_vis_frames); GT B-mode cached lazily.
+        self._vis_frames: torch.Tensor | None = None
+        self._vis_labels: list[str] = []
+        self._gt_db: list[np.ndarray] | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.run is not None
+
+    # ── scalars ──────────────────────────────────────────────────────────────
+    def log_epoch(self, epoch: int, metrics: dict) -> None:
+        if self.run is not None:
+            self.run.log({"epoch": epoch, **metrics}, step=epoch)
+
+    # ── reconstruction snapshots ─────────────────────────────────────────────
+    def set_vis_frames(self, frames: torch.Tensor, labels: list[str]) -> None:
+        """Fix the frames used for every snapshot so epochs stay comparable.
+
+        Args:
+            frames: (N, transducer, scanline, 2, sample) — already preprocessed
+                exactly like training inputs (focal zone selected, normalized).
+            labels: one short identifier per frame (e.g. "val[0]").
+        """
+        self._vis_frames = frames
+        self._vis_labels = labels
+
+    def log_reconstructions(
+        self, epoch: int, model: torch.nn.Module, pos_embed: torch.Tensor, device
+    ) -> None:
+        if self.run is None or self._beamformer is None or self._vis_frames is None:
+            return
+
+        model.eval()
+        with torch.no_grad():
+            x = self._vis_frames.to(device)
+            pred, _, _ = model(x, pos_embed)
+            recon = model.unpatchify(pred).cpu().numpy()
+        gt = self._vis_frames.numpy()
+
+        images = []
+        for i, label in enumerate(self._vis_labels):
+            gt_db, rec_db = self._beamformer.bmode_pair(gt[i], recon[i])
+            images.append(
+                self._wandb.Image(
+                    self._comparison_figure(gt_db, rec_db, f"{label} — epoch {epoch}"),
+                    caption=label,
+                )
+            )
+            plt.close("all")
+        self.run.log({"reconstructions": images}, step=epoch)
+
+    def _comparison_figure(self, gt_db, rec_db, title: str):
+        bf = self._beamformer
+        extent = [
+            bf.x_grid[0] * 1e3,
+            bf.x_grid[-1] * 1e3,
+            bf.z_grid[-1] * 1e3,
+            bf.z_grid[0] * 1e3,
+        ]
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4.5))
+        for ax, img, name, kw in (
+            (axes[0], gt_db, "ground truth", dict(cmap="gray", vmin=-50, vmax=0)),
+            (axes[1], rec_db, "reconstruction", dict(cmap="gray", vmin=-50, vmax=0)),
+            (
+                axes[2],
+                rec_db - gt_db,
+                "difference (dB)",
+                dict(cmap="coolwarm", vmin=-20, vmax=20),
+            ),
+        ):
+            im = ax.imshow(img, extent=extent, aspect="equal", **kw)
+            ax.set_title(name, fontsize=9)
+            ax.set_xlabel("Lateral (mm)", fontsize=8)
+            fig.colorbar(im, ax=ax, fraction=0.046)
+        axes[0].set_ylabel("Depth (mm)", fontsize=8)
+        fig.suptitle(title, fontsize=10)
+        fig.tight_layout()
+        return fig
+
+    # ── lifecycle ────────────────────────────────────────────────────────────
+    def finish(self, summary: dict | None = None) -> None:
+        if self.run is not None:
+            if summary:
+                for k, v in summary.items():
+                    self.run.summary[k] = v
+            self.run.finish()
