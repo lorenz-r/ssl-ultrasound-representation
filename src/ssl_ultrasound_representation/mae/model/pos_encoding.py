@@ -31,5 +31,27 @@ def get_sinusoidal_positional_encoding(seq_len: int, d_model: int) -> torch.Tens
     
     # Apply cosine to all odd indices in the embedding dimension (1, 3, 5...)
     pe[:, 1::2] = torch.cos(position * div_term)
-    
+
     return pe
+
+
+def build_grid_positional_encoding(grid_sizes: tuple[int, ...], d_model: int) -> torch.Tensor:
+    """
+    Positional encoding for a flattened N-D token grid: the sum of one
+    sinusoidal encoding per axis, broadcast over the grid and flattened
+    row-major (last axis fastest).
+
+    Args:
+        grid_sizes: token-grid extent per axis, e.g. (scanlines, focal_zones,
+            depth_windows). Flattening order must match the model's patchify.
+        d_model: embedding dimension.
+
+    Returns:
+        Tensor of shape (prod(grid_sizes), d_model).
+    """
+    pe = torch.zeros(*grid_sizes, d_model)
+    for axis, n in enumerate(grid_sizes):
+        shape = [1] * len(grid_sizes) + [d_model]
+        shape[axis] = n
+        pe = pe + get_sinusoidal_positional_encoding(n, d_model).view(*shape)
+    return pe.view(-1, d_model)

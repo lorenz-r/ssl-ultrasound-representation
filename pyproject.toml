@@ -5,22 +5,19 @@ description = "Self-supervised latent space learning for ultrasound image repres
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "h5py>=3.0",
-    "matplotlib>=3.5",
-    "numpy>=1.24",
-    "pymust (>=0.1.9,<0.2.0)",
-    "zarr (<3)",
-    "numcodecs (<0.16)",
-    "tqdm (>=4.68.1,<5.0.0)",
-    "huggingface-hub (>=0.20)",
-    "torch (>=2.0)",
+  "h5py>=3.0",
+  "matplotlib>=3.5",
+  "numpy>=1.24",
+  "pymust (>=0.1.9,<0.2.0)",
+  "zarr (<3)",
+  "numcodecs (<0.16)",
+  "tqdm (>=4.68.1,<5.0.0)",
+  "huggingface-hub (>=0.20)",
+  "torch (>=2.0)",
 ]
 
 [tool.poetry]
-package-mode = true
-packages = [
-    { include = "ssl_ultrasound_representation", from = "src" }
-]
+packages = [{ include = "ssl_ultrasound_representation", from = "src" }]
 
 
 [build-system]

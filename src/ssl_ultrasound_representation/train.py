@@ -1,16 +1,38 @@
 from __future__ import annotations
 
+import math
+from pathlib import Path
+
 import torch
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from ssl_ultrasound_representation.mae.model.us_mae import SignalMAE
 from ssl_ultrasound_representation.mae.model.loss import calculate_loss
 from ssl_ultrasound_representation.mae.model.pos_encoding import (
-    get_sinusoidal_positional_encoding,
+    build_grid_positional_encoding,
 )
 from ssl_ultrasound_representation.dataset import build_split_datasets
+
+
+def normalize_frame(t: torch.Tensor) -> torch.Tensor:
+    """Standardize one frame to zero mean / unit std (raw RF dynamic range is huge)."""
+    return (t - t.mean()) / (t.std() + 1e-8)
+
+
+def preprocess_frame(t: torch.Tensor) -> torch.Tensor:
+    """(transducer, scanline, focal_zone, iq, sample) -> first focal zone, standardized."""
+    return normalize_frame(t[:, :, 0])
+
+
+def default_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 def train(config: dict | None = None) -> dict:
@@ -22,56 +44,62 @@ def train(config: dict | None = None) -> dict:
     # ------------------------------------------------------------------
     lr = config.get("lr", 1.5e-4)
     weight_decay = config.get("weight_decay", 0.05)
-    epochs = config.get("epochs", 10)
-    batch_size = config.get("batch_size", 16)
-    num_workers = config.get("num_workers", 4)
-    device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
-    mask_ratio = config.get("mask_ratio", 0.75)
+    epochs = config.get("epochs", 200)
+    warmup_epochs = config.get("warmup_epochs", 20)
+    batch_size = config.get("batch_size", 2)
+    num_workers = config.get("num_workers", 2)
+    grad_clip = config.get("grad_clip", 1.0)
+    device = config.get("device", default_device())
+    mask_ratio = config.get("mask_ratio", 0.0)  # 0.0 = plain autoencoder
+    loss_on = config.get("loss_on", "all")  # "all" keeps every patch supervised
     save_checkpoints = config.get("save_checkpoints", False)
 
-    # Data dimensions (from the US dataset)
-    depth = 215 * 2  # S = sample × IQ
-    n_channels = 192  # C = transducer elements
-    n_temporal = 192 * 3  # N = scanline × focal zones
-    n_patches = 192  # P = transducer elements (patch_size[1]=1)
+    # Data dimensions: zarr layout (frame, transducer, scanline, focal_zone, iq, sample);
+    # only the first focal zone is used (selected in preprocess_frame).
+    n_transducers = 192
+    n_scanlines = 192
+    n_samples = 215
+    depth_window = config.get("depth_window", 43)
+    transducer_window = config.get("transducer_window", 64)
+    n_depth_windows = n_samples // depth_window
+    n_transducer_groups = n_transducers // transducer_window
 
     embed_dim = config.get("embed_dim", 128)
-    decoder_embed_dim = config.get("decoder_embed_dim", 64)
 
     # ------------------------------------------------------------------
     # Model
     # ------------------------------------------------------------------
     model = SignalMAE(
-        original_channels=depth,
+        n_transducers=n_transducers,
+        transducer_window=transducer_window,
+        n_scanlines=n_scanlines,
+        n_samples=n_samples,
+        depth_window=depth_window,
         embed_dim=embed_dim,
         encoder_depth=config.get("encoder_depth", 4),
         encoder_heads=config.get("encoder_heads", 8),
-        decoder_embed_dim=decoder_embed_dim,
+        decoder_embed_dim=config.get("decoder_embed_dim", 64),
         decoder_depth=config.get("decoder_depth", 2),
         decoder_heads=config.get("decoder_heads", 4),
         dim_feedforward=config.get("dim_feedforward", 512),
-        patch_size=(depth, 1),
         mask_ratio=mask_ratio,
-        grid_spatial=n_patches,
-        grid_temporal=n_temporal,
+    ).to(device)
+
+    # Encoder positional encoding over the (scanline, transducer-group, depth-window) grid
+    pos_embed = build_grid_positional_encoding(
+        (n_scanlines, n_transducer_groups, n_depth_windows), embed_dim
     ).to(device)
 
     # ------------------------------------------------------------------
-    # Positional encodings (sinusoidal, precomputed once)
-    # ------------------------------------------------------------------
-    pos_embed_spatial = get_sinusoidal_positional_encoding(n_patches, embed_dim).to(
-        device
-    )
-    pos_embed_temporal = get_sinusoidal_positional_encoding(n_temporal, embed_dim).to(
-        device
-    )
-
-    # ------------------------------------------------------------------
-    # Data
+    # Data — file-level split (subject split is degenerate with 2 subjects),
+    # no test set for now; transform keeps focal zone 0 and standardizes.
     # ------------------------------------------------------------------
     splits, meta = build_split_datasets(
-        local_zip="data/ultrasonic_dataset.zarr.zip",
-        local_metadata="data/ultrasonic_dataset.metadata.json",
+        local_zip="data/processed/ultrasonic_dataset.zarr.zip",
+        local_metadata="data/processed/ultrasonic_dataset.metadata.json",
+        split_strategy="file",
+        ratios=config.get("split_ratios", (0.85, 0.15, 0.0)),
+        transform=preprocess_frame,
     )
 
     train_loader = DataLoader(
@@ -80,7 +108,7 @@ def train(config: dict | None = None) -> dict:
         shuffle=True,
         num_workers=num_workers,
         pin_memory=config.get("pin_memory", False),
-        drop_last=True,
+        drop_last=False,
     )
     val_loader = DataLoader(
         splits["val"],
@@ -93,12 +121,29 @@ def train(config: dict | None = None) -> dict:
     print(
         f"Train samples: {len(splits['train'])}  |  Val samples: {len(splits['val'])}"
     )
+    print(f"Tokens/frame: {model.num_tokens}  |  patch dim: {model.patch_dim}")
     print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"Device: {device}")
 
     # ------------------------------------------------------------------
-    # Optimiser
+    # Optimiser + LR schedule (linear warmup -> cosine decay, per step)
     # ------------------------------------------------------------------
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    steps_per_epoch = max(len(train_loader), 1)
+    total_steps = epochs * steps_per_epoch
+    warmup_steps = warmup_epochs * steps_per_epoch
+
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return (step + 1) / max(warmup_steps, 1)
+        progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = LambdaLR(optimizer, lr_lambda)
+
+    if save_checkpoints:
+        Path("checkpoints").mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Training loop
@@ -112,27 +157,21 @@ def train(config: dict | None = None) -> dict:
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
         for batch in pbar:
-            # dataset returns (B, 215, 192, 192, 3, 2)
-            #   dims: (B, samples, transducers, scanlines, focal_zones, IQ)
+            # batch: (B, transducer, scanline, focal_zone, iq, sample)
             x = batch.to(device, non_blocking=True)
-            x = x.permute(0, 1, 5, 2, 3, 4).reshape(
-                x.size(0), depth, n_channels, n_temporal
-            )
 
             optimizer.zero_grad()
-
-            x_pred, ids_restore, len_keep = model(
-                x, pos_embed_spatial, pos_embed_temporal
-            )
-
-            loss = calculate_loss(x_pred, x, ids_restore, mask_ratio)
+            pred, target, mask = model(x, pos_embed)
+            loss = calculate_loss(pred, target, mask, loss_on=loss_on)
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
+            scheduler.step()
 
             train_loss += loss.item()
             train_batches += 1
-            pbar.set_postfix(loss=loss.item())
+            pbar.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0])
 
         avg_train_loss = train_loss / max(train_batches, 1)
 
@@ -146,31 +185,26 @@ def train(config: dict | None = None) -> dict:
         with torch.no_grad():
             for batch in val_loader:
                 x = batch.to(device, non_blocking=True)
-                x = x.permute(0, 1, 5, 2, 3, 4).reshape(
-                    x.size(0), depth, n_channels, n_temporal
-                )
-                x_pred, ids_restore, len_keep = model(
-                    x, pos_embed_spatial, pos_embed_temporal
-                )
-                loss = calculate_loss(x_pred, x, ids_restore, mask_ratio)
+                pred, target, mask = model(x, pos_embed)
+                loss = calculate_loss(pred, target, mask, loss_on=loss_on)
                 val_loss += loss.item()
                 val_batches += 1
 
-        avg_val_loss = val_loss / max(val_batches, 1)
+        avg_val_loss = val_loss / val_batches if val_batches else float("nan")
 
         print(
             f"Epoch {epoch:3d}  |  "
             f"train loss: {avg_train_loss:.6f}  |  "
-            f"val loss:   {avg_val_loss:.6f}"
+            f"val loss:   {avg_val_loss:.6f}  |  "
+            f"lr: {scheduler.get_last_lr()[0]:.2e}"
         )
 
         # ------------------------------------------------------------------
         # Checkpoint
         # ------------------------------------------------------------------
-
-        if save_checkpoints:
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
+        if val_batches and avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            if save_checkpoints:
                 torch.save(
                     {
                         "epoch": epoch,
