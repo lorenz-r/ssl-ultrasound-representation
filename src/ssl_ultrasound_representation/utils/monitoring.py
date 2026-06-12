@@ -35,7 +35,7 @@ class TrainingMonitor:
         enabled: bool = True,
         project: str = "ssl-ultrasound-mae",
         run_name: str | None = None,
-        beamform_params: str = "data/processed/beamform_params.json",
+        beamform_params: str = "configs/beamform_params.json",
         focal_zone: int = 0,
     ):
         self.run = None

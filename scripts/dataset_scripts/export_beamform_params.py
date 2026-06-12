@@ -35,7 +35,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mat-file", type=Path, required=True)
     parser.add_argument(
-        "--out", type=Path, default=Path("data/processed/beamform_params.json")
+        "--out", type=Path, default=Path("configs/beamform_params.json")
     )
     args = parser.parse_args()
 
