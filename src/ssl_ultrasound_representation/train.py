@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.ssl_ultrasound_representation.mae.model.us_mae import FAIRSignalMAE
-from src.ssl_ultrasound_representation.mae.model.loss import calculate_loss
-from src.ssl_ultrasound_representation.mae.model.pos_encoding import get_sinusoidal_positional_encoding
-from src.ssl_ultrasound_representation.dataset import build_split_datasets
+from ssl_ultrasound_representation.mae.model.us_mae import SignalMAE
+from ssl_ultrasound_representation.mae.model.loss import calculate_loss
+from ssl_ultrasound_representation.mae.model.pos_encoding import (
+    get_sinusoidal_positional_encoding,
+)
+from ssl_ultrasound_representation.dataset import build_split_datasets
 
 
 def train(config: dict | None = None) -> dict:
@@ -21,17 +22,18 @@ def train(config: dict | None = None) -> dict:
     # ------------------------------------------------------------------
     lr = config.get("lr", 1.5e-4)
     weight_decay = config.get("weight_decay", 0.05)
-    epochs = config.get("epochs", 200)
+    epochs = config.get("epochs", 10)
     batch_size = config.get("batch_size", 16)
     num_workers = config.get("num_workers", 4)
     device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
     mask_ratio = config.get("mask_ratio", 0.75)
+    save_checkpoints = config.get("save_checkpoints", False)
 
     # Data dimensions (from the US dataset)
-    depth = 215 * 2        # S = sample × IQ
-    n_channels = 192       # C = transducer elements
-    n_temporal = 192 * 3   # N = scanline × focal zones
-    n_patches = 192        # P = transducer elements (patch_size[1]=1)
+    depth = 215 * 2  # S = sample × IQ
+    n_channels = 192  # C = transducer elements
+    n_temporal = 192 * 3  # N = scanline × focal zones
+    n_patches = 192  # P = transducer elements (patch_size[1]=1)
 
     embed_dim = config.get("embed_dim", 128)
     decoder_embed_dim = config.get("decoder_embed_dim", 64)
@@ -39,7 +41,7 @@ def train(config: dict | None = None) -> dict:
     # ------------------------------------------------------------------
     # Model
     # ------------------------------------------------------------------
-    model = FAIRSignalMAE(
+    model = SignalMAE(
         original_channels=depth,
         embed_dim=embed_dim,
         encoder_depth=config.get("encoder_depth", 4),
@@ -57,16 +59,19 @@ def train(config: dict | None = None) -> dict:
     # ------------------------------------------------------------------
     # Positional encodings (sinusoidal, precomputed once)
     # ------------------------------------------------------------------
-    pos_embed_spatial = get_sinusoidal_positional_encoding(n_patches, embed_dim).to(device)
-    pos_embed_temporal = get_sinusoidal_positional_encoding(n_temporal, embed_dim).to(device)
+    pos_embed_spatial = get_sinusoidal_positional_encoding(n_patches, embed_dim).to(
+        device
+    )
+    pos_embed_temporal = get_sinusoidal_positional_encoding(n_temporal, embed_dim).to(
+        device
+    )
 
     # ------------------------------------------------------------------
     # Data
     # ------------------------------------------------------------------
     splits, meta = build_split_datasets(
-        config.get("hf_path", "benbarkow/test-us-ssl"),
-        split_strategy=config.get("split_strategy", "file"),
-        cache_dir=config.get("cache_dir", "/tmp/hf_cache"),
+        local_zip="data/ultrasonic_dataset.zarr.zip",
+        local_metadata="data/ultrasonic_dataset.metadata.json",
     )
 
     train_loader = DataLoader(
@@ -74,7 +79,7 @@ def train(config: dict | None = None) -> dict:
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=config.get("pin_memory", False),
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -82,10 +87,12 @@ def train(config: dict | None = None) -> dict:
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=config.get("pin_memory", False),
     )
 
-    print(f"Train samples: {len(splits['train'])}  |  Val samples: {len(splits['val'])}")
+    print(
+        f"Train samples: {len(splits['train'])}  |  Val samples: {len(splits['val'])}"
+    )
     print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
 
     # ------------------------------------------------------------------
@@ -105,12 +112,18 @@ def train(config: dict | None = None) -> dict:
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
         for batch in pbar:
-            # batch shape: (B, S, C, N)
+            # dataset returns (B, 215, 192, 192, 3, 2)
+            #   dims: (B, samples, transducers, scanlines, focal_zones, IQ)
             x = batch.to(device, non_blocking=True)
+            x = x.permute(0, 1, 5, 2, 3, 4).reshape(
+                x.size(0), depth, n_channels, n_temporal
+            )
 
             optimizer.zero_grad()
 
-            x_pred, ids_restore, len_keep = model(x, pos_embed_spatial, pos_embed_temporal)
+            x_pred, ids_restore, len_keep = model(
+                x, pos_embed_spatial, pos_embed_temporal
+            )
 
             loss = calculate_loss(x_pred, x, ids_restore, mask_ratio)
 
@@ -133,7 +146,12 @@ def train(config: dict | None = None) -> dict:
         with torch.no_grad():
             for batch in val_loader:
                 x = batch.to(device, non_blocking=True)
-                x_pred, ids_restore, len_keep = model(x, pos_embed_spatial, pos_embed_temporal)
+                x = x.permute(0, 1, 5, 2, 3, 4).reshape(
+                    x.size(0), depth, n_channels, n_temporal
+                )
+                x_pred, ids_restore, len_keep = model(
+                    x, pos_embed_spatial, pos_embed_temporal
+                )
                 loss = calculate_loss(x_pred, x, ids_restore, mask_ratio)
                 val_loss += loss.item()
                 val_batches += 1
@@ -149,19 +167,21 @@ def train(config: dict | None = None) -> dict:
         # ------------------------------------------------------------------
         # Checkpoint
         # ------------------------------------------------------------------
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "train_loss": avg_train_loss,
-                    "val_loss": avg_val_loss,
-                    "config": config,
-                },
-                "best_mae_checkpoint.pt",
-            )
+
+        if save_checkpoints:
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "train_loss": avg_train_loss,
+                        "val_loss": avg_val_loss,
+                        "config": config,
+                    },
+                    "checkpoints/best_mae_checkpoint.pt",
+                )
 
     print(f"Training complete. Best val loss: {best_val_loss:.6f}")
     return {"best_val_loss": best_val_loss}
