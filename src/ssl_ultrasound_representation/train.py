@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.ssl_ultrasound_representation.mae.model.us_mae import FAIRSignalMAE
+from src.ssl_ultrasound_representation.mae.model.us_mae import SignalMAE
 from src.ssl_ultrasound_representation.mae.model.loss import calculate_loss
 from src.ssl_ultrasound_representation.mae.model.pos_encoding import get_sinusoidal_positional_encoding
 from src.ssl_ultrasound_representation.dataset import build_split_datasets
@@ -39,7 +38,7 @@ def train(config: dict | None = None) -> dict:
     # ------------------------------------------------------------------
     # Model
     # ------------------------------------------------------------------
-    model = FAIRSignalMAE(
+    model = SignalMAE(
         original_channels=depth,
         embed_dim=embed_dim,
         encoder_depth=config.get("encoder_depth", 4),
@@ -105,8 +104,9 @@ def train(config: dict | None = None) -> dict:
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
         for batch in pbar:
-            # batch shape: (B, S, C, N)
+            # dataset returns (B, transducers, scanlines, focal_zones, 2, samples)
             x = batch.to(device, non_blocking=True)
+            x = x.permute(0, 5, 4, 1, 2, 3).reshape(x.size(0), depth, n_channels, n_temporal)
 
             optimizer.zero_grad()
 
@@ -133,6 +133,7 @@ def train(config: dict | None = None) -> dict:
         with torch.no_grad():
             for batch in val_loader:
                 x = batch.to(device, non_blocking=True)
+                x = x.permute(0, 5, 4, 1, 2, 3).reshape(x.size(0), depth, n_channels, n_temporal)
                 x_pred, ids_restore, len_keep = model(x, pos_embed_spatial, pos_embed_temporal)
                 loss = calculate_loss(x_pred, x, ids_restore, mask_ratio)
                 val_loss += loss.item()
