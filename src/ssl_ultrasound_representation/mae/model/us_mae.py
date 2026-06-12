@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-class FAIRSignalMAE(nn.Module):
+class SignalMAE(nn.Module):
     def __init__(self, 
                  original_channels=847, 
                  embed_dim=128, 
@@ -105,7 +105,7 @@ class FAIRSignalMAE(nn.Module):
         # --- 4. Pass through ENCODER ---
         x_masked = x_masked.view(B, len_keep * N, D)
         x_encoded = self.encoder(x_masked) 
-        x_encoded = self.encoder_norm(x_encoded)  # Fix 1 & 6: Added final layer norm
+        x_encoded = self.encoder_norm(x_encoded)  # Added final layer norm
         x_encoded = x_encoded.view(B, len_keep, N, D)
 
         # --- 5. Project to Decoder Space ---
@@ -115,7 +115,7 @@ class FAIRSignalMAE(nn.Module):
         x_full = self.spatial_tube_unshuffle(x_decoder_input, ids_restore, len_keep) 
 
         # --- 7. Add Decoupled Decoder Positional Embeddings ---
-        # Fix 4: No longer projecting encoder PE, using dedicated decoder parameters
+        # No longer projecting encoder PE, using dedicated decoder parameters
         pe_decoder = self.decoder_pos_embed_spatial + self.decoder_pos_embed_temporal
         x_full = x_full + pe_decoder
 
