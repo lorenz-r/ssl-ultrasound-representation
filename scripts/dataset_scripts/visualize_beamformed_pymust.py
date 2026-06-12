@@ -175,7 +175,7 @@ def _tx_delays_192(group: dict, meta: dict) -> np.ndarray:
 # ── beamformer ──────────────────────────────────────────────────────────────────
 
 
-def beamform_multifocal(
+def beamform_per_zone(
     meta: dict,
     rf_raw: np.ndarray,
     nx: int = 256,
@@ -184,14 +184,18 @@ def beamform_multifocal(
     fnumber: float = 1.5,
     scanline_step: int = 1,
     max_depth_m: float | None = 25e-3,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[list[float], dict[float, np.ndarray], np.ndarray, np.ndarray]:
     """
-    Reconstruct a log-compressed B-mode image with PyMUST.
+    DAS-beamform each focal zone into its own full-depth complex composite.
+
+    This is the expensive step. Each focal zone is reconstructed across the
+    entire depth grid (it is only well-focused near its own focal depth), so the
+    per-zone composites can later be stitched in any combination.
 
     This acquisition records no echo below ~20 mm, so max_depth_m caps the
     reconstruction depth (saves compute and crops the empty region).
 
-    Returns (log_img_dB[-50..0], x_grid_m, z_grid_m).
+    Returns (focal_depths_sorted, {focus_m: complex (nz,nx)}, x_grid_m, z_grid_m).
     """
     elem_x = meta["elem_x"]
     z_end = (
@@ -252,8 +256,25 @@ def beamform_multifocal(
         wt = zone_wts[fz]
         np.divide(zone_imgs[fz], wt, out=zone_imgs[fz], where=wt > 0)
 
-    # ── axial stitching: linear cross-fade between adjacent focal zones ──
+    return focal_depths, zone_imgs, x_grid, z_grid
+
+
+def stitch_zones(
+    zone_imgs: dict[float, np.ndarray],
+    focal_depths: list[float],
+    z_grid: np.ndarray,
+) -> np.ndarray:
+    """
+    Axially combine focal-zone composites with a linear cross-fade.
+
+    `focal_depths` may be any non-empty subset of the available zones (sorted by
+    depth): shallower than the first zone uses that zone, deeper than the last
+    uses that one, and depths in between are linearly blended between neighbours.
+
+    Returns the combined complex image (nz, nx).
+    """
     fds = np.array(focal_depths)
+    nz = z_grid.size
     n_fz = len(focal_depths)
     zone_stack = np.stack([zone_imgs[fz] for fz in focal_depths])  # (n_fz, nz, nx)
     w = np.zeros((n_fz, nz), dtype=np.float32)
@@ -269,14 +290,53 @@ def beamform_multifocal(
     np.add.at(w, (j, np.where(mid)[0]), 1.0 - t)
     np.add.at(w, (j + 1, np.where(mid)[0]), t)
 
-    final = np.einsum("fz,fzx->zx", w, zone_stack)
+    return np.einsum("fz,fzx->zx", w, zone_stack)
 
-    # ── time-gain compensation + log compression ──
+
+def to_db(final: np.ndarray, ref_max: float | None = None) -> np.ndarray:
+    """
+    Time-gain compensate, log-compress and clip a complex image to [-50, 0] dB.
+
+    Pass `ref_max` (a shared 0 dB reference envelope) to make several images
+    brightness-comparable; otherwise each image is normalised to its own peak.
+    """
     env = np.abs(final)
     env, _ = pymust.tgc(env)
     env = np.maximum(env, 1e-9)
-    log_img = 20.0 * np.log10(env / env.max())
-    return np.clip(log_img, -50, 0), x_grid, z_grid
+    ref = env.max() if ref_max is None else ref_max
+    log_img = 20.0 * np.log10(env / ref)
+    return np.clip(log_img, -50, 0)
+
+
+def beamform_multifocal(
+    meta: dict,
+    rf_raw: np.ndarray,
+    nx: int = 256,
+    nz: int = 384,
+    strip_halfwidth_m: float = 1.5e-3,
+    fnumber: float = 1.5,
+    scanline_step: int = 1,
+    max_depth_m: float | None = 25e-3,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Reconstruct a log-compressed B-mode image with PyMUST.
+
+    Beamforms every focal zone and stitches them into the full multi-focal image.
+
+    Returns (log_img_dB[-50..0], x_grid_m, z_grid_m).
+    """
+    focal_depths, zone_imgs, x_grid, z_grid = beamform_per_zone(
+        meta,
+        rf_raw,
+        nx=nx,
+        nz=nz,
+        strip_halfwidth_m=strip_halfwidth_m,
+        fnumber=fnumber,
+        scanline_step=scanline_step,
+        max_depth_m=max_depth_m,
+    )
+    final = stitch_zones(zone_imgs, focal_depths, z_grid)
+    return to_db(final), x_grid, z_grid
 
 
 # ── visualisation ────────────────────────────────────────────────────────────────
