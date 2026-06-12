@@ -9,3 +9,4 @@ huggingface_hub>=0.20
 # torch is consumed only by the PyTorch wrapper in src/dataset.py (lazy import).
 # Install the variant that matches your accelerator (CUDA / MPS / CPU).
 torch>=2.0
+wandb>=0.27,<0.28

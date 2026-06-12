@@ -61,8 +61,13 @@ def train(config: dict | None = None) -> dict:
     run_name = config.get("run_name")
     vis_every = config.get("vis_every", 10)  # beamformed snapshot cadence (epochs)
     n_vis_frames = config.get("n_vis_frames", 2)
-    beamform_params = config.get(
-        "beamform_params", "data/processed/beamform_params.json"
+    beamform_params = config.get("beamform_params", "configs/beamform_params.json")
+
+    # Data source: HF dataset repo (cluster) or local zarr.zip (default)
+    hf_repo = config.get("hf_repo")
+    data_zip = config.get("data_zip", "data/processed/ultrasonic_dataset.zarr.zip")
+    data_metadata = config.get(
+        "data_metadata", "data/processed/ultrasonic_dataset.metadata.json"
     )
 
     # Data dimensions: zarr layout (frame, transducer, scanline, focal_zone, iq, sample);
@@ -105,9 +110,12 @@ def train(config: dict | None = None) -> dict:
     # Data — file-level split (subject split is degenerate with 2 subjects),
     # no test set for now; transform keeps focal zone 0 and standardizes.
     # ------------------------------------------------------------------
+    data_source = (
+        {"repo_id": hf_repo} if hf_repo
+        else {"local_zip": data_zip, "local_metadata": data_metadata}
+    )
     splits, meta = build_split_datasets(
-        local_zip="data/processed/ultrasonic_dataset.zarr.zip",
-        local_metadata="data/processed/ultrasonic_dataset.metadata.json",
+        **data_source,
         split_strategy="file",
         ratios=config.get("split_ratios", (0.85, 0.15, 0.0)),
         transform=preprocess_frame,
@@ -284,5 +292,40 @@ def train(config: dict | None = None) -> dict:
     return {"best_val_loss": best_val_loss}
 
 
+def _cli() -> dict:
+    """Build a config dict from CLI flags (only explicitly passed flags)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train the ultrasound MAE.")
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--warmup-epochs", type=int, dest="warmup_epochs")
+    parser.add_argument("--batch-size", type=int, dest="batch_size")
+    parser.add_argument("--lr", type=float)
+    parser.add_argument("--mask-ratio", type=float, dest="mask_ratio")
+    parser.add_argument("--loss-on", choices=["all", "masked"], dest="loss_on")
+    parser.add_argument("--depth-window", type=int, dest="depth_window")
+    parser.add_argument("--transducer-window", type=int, dest="transducer_window")
+    parser.add_argument("--embed-dim", type=int, dest="embed_dim")
+    parser.add_argument("--num-workers", type=int, dest="num_workers")
+    parser.add_argument("--device")
+    parser.add_argument("--hf-repo", dest="hf_repo",
+                        help="HF dataset repo id (e.g. user/ssl-ultrasound-rats); "
+                             "falls back to local data/processed/ files if omitted.")
+    parser.add_argument("--data-zip", dest="data_zip")
+    parser.add_argument("--data-metadata", dest="data_metadata")
+    parser.add_argument("--beamform-params", dest="beamform_params")
+    parser.add_argument("--run-name", dest="run_name")
+    parser.add_argument("--vis-every", type=int, dest="vis_every")
+    parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument("--save-checkpoints", action="store_true",
+                        dest="save_checkpoints")
+    args = vars(parser.parse_args())
+
+    config = {k: v for k, v in args.items() if v not in (None, False)}
+    if config.pop("no_wandb", None):
+        config["use_wandb"] = False
+    return config
+
+
 if __name__ == "__main__":
-    train()
+    train(_cli())
