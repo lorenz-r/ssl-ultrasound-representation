@@ -1,0 +1,321 @@
+"""
+HuggingFace-backed dataset loader for the aggregated MultiFocal ultrasound zarr.
+
+The companion build script (`scripts/dataset_scripts/build_mae_dataset.py`)
+produces two artefacts:
+  * `ultrasonic_dataset.zarr.zip` — 6D float32 array
+    `(frames, transducers, scanlines, focal_zones, 2, samples)`
+  * `ultrasonic_dataset.metadata.json` — per-frame provenance
+
+This module downloads them once from a HuggingFace dataset repo (cached on
+local SSD, not `$HOME`), exposes a raw `(zarr.Array, metadata)` handle for
+notebooks / EDA, and provides leakage-safe splits + a thin `torch.utils.data.
+Dataset` wrapper for SSL training.
+
+Typical usage:
+    from src.dataset import build_split_datasets
+    splits, meta = build_split_datasets("user/repo", split_strategy="subject")
+    train_ds = splits["train"]
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import random
+import warnings
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, Callable, Literal
+
+import zarr
+from huggingface_hub import hf_hub_download
+
+DEFAULT_ZARR_FILENAME = "ultrasonic_dataset.zarr.zip"
+DEFAULT_METADATA_FILENAME = "ultrasonic_dataset.metadata.json"
+DEFAULT_ARRAY_NAME = "rf_iq"
+DEFAULT_CACHE_DIR = "/tmp/hf_cache"
+CACHE_ENV_VAR = "HF_CACHE_DIR"
+
+
+# ── cache resolution ──────────────────────────────────────────────────────────
+def resolve_cache_dir(explicit: str | os.PathLike | None = None) -> Path:
+    """Pick the HF cache root. Priority: explicit arg > $HF_CACHE_DIR > /tmp/hf_cache."""
+    if explicit is not None:
+        path = Path(explicit)
+    else:
+        env_val = os.environ.get(CACHE_ENV_VAR)
+        path = Path(env_val) if env_val else Path(DEFAULT_CACHE_DIR)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+# ── low-level accessors ───────────────────────────────────────────────────────
+def _open_zarr_array(
+    zip_path: str | os.PathLike, array_name: str = DEFAULT_ARRAY_NAME
+) -> zarr.Array:
+    store = zarr.ZipStore(str(zip_path), mode="r")
+    group = zarr.open_group(store=store, mode="r")
+    return group[array_name]
+
+
+def load_dataset(
+    repo_id: str,
+    *,
+    revision: str | None = None,
+    cache_dir: str | os.PathLike | None = None,
+    zarr_filename: str = DEFAULT_ZARR_FILENAME,
+    metadata_filename: str = DEFAULT_METADATA_FILENAME,
+    array_name: str = DEFAULT_ARRAY_NAME,
+    repo_type: str = "dataset",
+) -> tuple[zarr.Array, dict]:
+    """Download both artefacts from a HF repo (cached locally) and open them."""
+    cache_root = resolve_cache_dir(cache_dir)
+    zip_path = hf_hub_download(
+        repo_id=repo_id,
+        filename=zarr_filename,
+        revision=revision,
+        cache_dir=str(cache_root),
+        repo_type=repo_type,
+    )
+    meta_path = hf_hub_download(
+        repo_id=repo_id,
+        filename=metadata_filename,
+        revision=revision,
+        cache_dir=str(cache_root),
+        repo_type=repo_type,
+    )
+    arr = _open_zarr_array(zip_path, array_name=array_name)
+    metadata = json.loads(Path(meta_path).read_text())
+    return arr, metadata
+
+
+def load_local_dataset(
+    zip_path: str | os.PathLike,
+    metadata_path: str | os.PathLike,
+    *,
+    array_name: str = DEFAULT_ARRAY_NAME,
+) -> tuple[zarr.Array, dict]:
+    """Open a zarr.zip + metadata.json already on disk (no HF round-trip)."""
+    arr = _open_zarr_array(zip_path, array_name=array_name)
+    metadata = json.loads(Path(metadata_path).read_text())
+    return arr, metadata
+
+
+# ── split helpers ─────────────────────────────────────────────────────────────
+def _allocate_ratios(
+    items: list, ratios: tuple[float, float, float]
+) -> tuple[list, list, list]:
+    if abs(sum(ratios) - 1.0) > 1e-6:
+        raise ValueError(f"ratios must sum to 1, got {ratios}")
+    n = len(items)
+    n_train = int(round(n * ratios[0]))
+    n_val = int(round(n * ratios[1]))
+    if n_train + n_val > n:
+        n_val = max(0, n - n_train)
+    return (
+        items[:n_train],
+        items[n_train : n_train + n_val],
+        items[n_train + n_val :],
+    )
+
+
+def _assert_disjoint(groups: dict[str, list], label: str) -> None:
+    seen: dict[Any, str] = {}
+    for name, items in groups.items():
+        for x in items:
+            if x in seen:
+                raise ValueError(
+                    f"{label} {x!r} listed in both {seen[x]!r} and {name!r}"
+                )
+            seen[x] = name
+
+
+def split_by_subject(
+    metadata: dict,
+    *,
+    ratios: tuple[float, float, float] = (0.7, 0.15, 0.15),
+    seed: int = 42,
+    train_subjects: list[str] | None = None,
+    val_subjects: list[str] | None = None,
+    test_subjects: list[str] | None = None,
+) -> dict[str, list[int]]:
+    """
+    Split global frame indices grouped by subject. No subject appears in two splits.
+
+    Pass any of `train_subjects` / `val_subjects` / `test_subjects` to override the
+    random allocation explicitly (useful when subject count is small).
+    """
+    frames = metadata["frames"]
+    by_subject: dict[str, list[int]] = defaultdict(list)
+    for fm in frames:
+        by_subject[fm["subject"]].append(fm["global_frame_index"])
+    subjects = sorted(by_subject.keys())
+
+    explicit = any(
+        s is not None for s in (train_subjects, val_subjects, test_subjects)
+    )
+    if explicit:
+        train_s = list(train_subjects or [])
+        val_s = list(val_subjects or [])
+        test_s = list(test_subjects or [])
+        for grp in (train_s, val_s, test_s):
+            for s in grp:
+                if s not in by_subject:
+                    raise ValueError(
+                        f"Subject {s!r} not present in metadata; have {subjects}"
+                    )
+        _assert_disjoint(
+            {"train": train_s, "val": val_s, "test": test_s}, "subject"
+        )
+    else:
+        if len(subjects) < 3:
+            warnings.warn(
+                f"split_by_subject called with only {len(subjects)} subjects "
+                f"({subjects}); random allocation will be degenerate. Pass "
+                f"explicit train/val/test_subjects for control.",
+                stacklevel=2,
+            )
+        rng = random.Random(seed)
+        shuffled = subjects.copy()
+        rng.shuffle(shuffled)
+        train_s, val_s, test_s = _allocate_ratios(shuffled, ratios)
+
+    return {
+        "train": sorted(i for s in train_s for i in by_subject[s]),
+        "val": sorted(i for s in val_s for i in by_subject[s]),
+        "test": sorted(i for s in test_s for i in by_subject[s]),
+    }
+
+
+def split_by_file(
+    metadata: dict,
+    *,
+    ratios: tuple[float, float, float] = (0.7, 0.15, 0.15),
+    seed: int = 42,
+    group_by_subject: bool = True,
+) -> dict[str, list[int]]:
+    """
+    Split at unique-file granularity. Both frames of the same `.mat` cine end up
+    in the same split (each Verasonics file holds `numFrames=2` temporal frames).
+
+    When `group_by_subject=True` (default), files are stratified within each
+    subject so every subject is represented in every split.
+    """
+    frames = metadata["frames"]
+    by_file: dict[str, list[int]] = defaultdict(list)
+    file_subject: dict[str, str] = {}
+    for fm in frames:
+        rp = fm["relative_path"]
+        by_file[rp].append(fm["global_frame_index"])
+        file_subject[rp] = fm["subject"]
+
+    rng = random.Random(seed)
+    if group_by_subject:
+        subject_files: dict[str, list[str]] = defaultdict(list)
+        for rp, s in file_subject.items():
+            subject_files[s].append(rp)
+        train_files: list[str] = []
+        val_files: list[str] = []
+        test_files: list[str] = []
+        for s in sorted(subject_files):
+            files = sorted(subject_files[s])
+            rng.shuffle(files)
+            tr, vl, te = _allocate_ratios(files, ratios)
+            train_files += tr
+            val_files += vl
+            test_files += te
+    else:
+        files = sorted(by_file)
+        rng.shuffle(files)
+        train_files, val_files, test_files = _allocate_ratios(files, ratios)
+
+    return {
+        "train": sorted(i for f in train_files for i in by_file[f]),
+        "val": sorted(i for f in val_files for i in by_file[f]),
+        "test": sorted(i for f in test_files for i in by_file[f]),
+    }
+
+
+# ── PyTorch wrapper (lazy torch import) ───────────────────────────────────────
+class UltrasoundMAEDataset:
+    """
+    PyTorch Dataset returning one beamformed frame per item.
+
+    Item shape: `(transducers, scanlines, focal_zones, 2, samples)` — the full
+    per-frame 5D layout from the aggregator (the leading frame axis is indexed).
+
+    Pass `indices` from a split helper to materialise a sub-dataset without
+    copying the zarr array.
+    """
+
+    def __init__(
+        self,
+        arr: zarr.Array,
+        indices: list[int] | None = None,
+        dtype: Any = None,  # torch.float32 by default
+        transform: Callable | None = None,
+    ):
+        import torch  # noqa: F401 — required, deferred to keep the module torch-free
+
+        self._torch = torch
+        self.arr = arr
+        self.indices = (
+            list(range(arr.shape[0])) if indices is None else list(indices)
+        )
+        self.dtype = dtype if dtype is not None else torch.float32
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, i: int):
+        global_idx = self.indices[i]
+        frame = self.arr[global_idx]  # numpy ndarray
+        tensor = self._torch.from_numpy(frame).to(self.dtype)
+        if self.transform is not None:
+            tensor = self.transform(tensor)
+        return tensor
+
+
+# ── convenience constructor ───────────────────────────────────────────────────
+def build_split_datasets(
+    repo_id: str | None = None,
+    *,
+    local_zip: str | os.PathLike | None = None,
+    local_metadata: str | os.PathLike | None = None,
+    split_strategy: Literal["subject", "file"] = "subject",
+    cache_dir: str | os.PathLike | None = None,
+    revision: str | None = None,
+    transform: Callable | None = None,
+    **split_kwargs,
+) -> tuple[dict[str, UltrasoundMAEDataset], dict]:
+    """
+    One-call entry point for training scripts.
+
+    Either pass `repo_id` (HF dataset repo) OR both `local_zip` and `local_metadata`
+    (for testing against a local build before any upload).
+
+    Extra kwargs are forwarded to the chosen split function.
+    """
+    if repo_id is not None:
+        arr, meta = load_dataset(repo_id, revision=revision, cache_dir=cache_dir)
+    elif local_zip is not None and local_metadata is not None:
+        arr, meta = load_local_dataset(local_zip, local_metadata)
+    else:
+        raise ValueError(
+            "Pass `repo_id`, or both `local_zip` and `local_metadata`."
+        )
+
+    if split_strategy == "subject":
+        splits = split_by_subject(meta, **split_kwargs)
+    elif split_strategy == "file":
+        splits = split_by_file(meta, **split_kwargs)
+    else:
+        raise ValueError(f"unknown split_strategy: {split_strategy!r}")
+
+    datasets = {
+        name: UltrasoundMAEDataset(arr, indices=ix, transform=transform)
+        for name, ix in splits.items()
+    }
+    return datasets, meta
