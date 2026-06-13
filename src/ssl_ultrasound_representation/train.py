@@ -35,6 +35,21 @@ def default_device() -> str:
     return "cpu"
 
 
+def _amp_beneficial(device: str) -> bool:
+    """
+    Whether mixed precision actually speeds things up on this device.
+
+    fp16 is only a win on GPUs with Tensor Cores (Volta sm_70+), which also
+    have the flash-attention kernels. On older cards (e.g. Pascal TITAN Xp,
+    sm_61) fp16 runs many times slower than fp32, so autocast would be a large
+    slowdown. Evaluated at runtime so a heterogeneous cluster picks the right
+    setting per job — AMP off on old GPUs, on automatically on newer ones.
+    """
+    if device != "cuda":
+        return False
+    return torch.cuda.get_device_capability()[0] >= 7
+
+
 def train(config: dict | None = None) -> dict:
     if config is None:
         config = {}
@@ -57,9 +72,14 @@ def train(config: dict | None = None) -> dict:
     if device == "cuda":
         # Fixed token/patch shapes — let cuDNN lock in the fastest conv algos.
         torch.backends.cudnn.benchmark = True
-    # Mixed precision: real throughput + memory win on CUDA (frees room for
-    # bigger batches); default off elsewhere (MPS/CPU autocast is flaky/slow).
-    use_amp = config.get("amp", device == "cuda")
+    # Mixed precision only when the GPU benefits (Tensor Cores, sm_70+);
+    # auto-detected per run so the right setting is picked on whatever cluster
+    # GPU this job landed on. Override with config["amp"] / --no-amp.
+    use_amp = config.get("amp", _amp_beneficial(device))
+    if device == "cuda":
+        name = torch.cuda.get_device_name()
+        cap = ".".join(map(str, torch.cuda.get_device_capability()))
+        print(f"GPU: {name} (sm_{cap})  |  AMP: {use_amp}")
     log_every = config.get("log_every", 10)  # progress-bar sync cadence (steps)
     mask_ratio = config.get("mask_ratio", 0.0)  # 0.0 = plain autoencoder
     loss_on = config.get("loss_on", "all")  # "all" keeps every patch supervised
