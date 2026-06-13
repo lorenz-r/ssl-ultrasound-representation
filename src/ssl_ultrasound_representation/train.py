@@ -23,9 +23,8 @@ def normalize_frame(t: torch.Tensor) -> torch.Tensor:
     return (t - t.mean()) / (t.std() + 1e-8)
 
 
-def preprocess_frame(t: torch.Tensor) -> torch.Tensor:
-    """(transducer, scanline, focal_zone, iq, sample) -> first focal zone, standardized."""
-    return normalize_frame(t[:, :, 0])
+# Focal-zone selection happens at the zarr level (focal_zone=0 in
+# build_split_datasets); the transform only standardizes.
 
 
 def default_device() -> str:
@@ -48,7 +47,10 @@ def train(config: dict | None = None) -> dict:
     epochs = config.get("epochs", 200)
     warmup_epochs = config.get("warmup_epochs", 20)
     batch_size = config.get("batch_size", 2)
-    num_workers = config.get("num_workers", 2)
+    # Preloaded data lives in shared RAM — workers would only add respawn
+    # latency at every epoch boundary, so default to 0 in that case.
+    preload = config.get("preload", True)
+    num_workers = config.get("num_workers", 0 if preload else 4)
     grad_clip = config.get("grad_clip", 1.0)
     device = config.get("device", default_device())
     mask_ratio = config.get("mask_ratio", 0.0)  # 0.0 = plain autoencoder
@@ -109,34 +111,36 @@ def train(config: dict | None = None) -> dict:
 
     # ------------------------------------------------------------------
     # Data — file-level split (subject split is degenerate with 2 subjects),
-    # no test set for now; transform keeps focal zone 0 and standardizes.
+    # no test set for now. Focal zone 0 is sliced at the zarr level and frames
+    # are preloaded into shared RAM (see UltrasoundMAEDataset); the transform
+    # only standardizes each frame.
     # ------------------------------------------------------------------
     data_source = (
-        {"repo_id": hf_repo, "max_frames": max_frames} if hf_repo
+        {"repo_id": hf_repo, "max_frames": max_frames, "token": config.get("hf_token")}
+        if hf_repo
         else {"local_zip": data_zip, "local_metadata": data_metadata}
     )
     splits, meta = build_split_datasets(
         **data_source,
         split_strategy="file",
         ratios=config.get("split_ratios", (0.85, 0.15, 0.0)),
-        transform=preprocess_frame,
+        transform=normalize_frame,
+        focal_zone=config.get("focal_zone", 0),
+        preload=preload,
     )
 
+    # Persistent workers avoid respawning (and re-reading the first frame) at
+    # every epoch boundary; pointless when num_workers == 0.
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=config.get("pin_memory", False),
+        persistent_workers=num_workers > 0,
+    )
     train_loader = DataLoader(
-        splits["train"],
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=config.get("pin_memory", False),
-        drop_last=False,
+        splits["train"], shuffle=True, drop_last=False, **loader_kwargs
     )
-    val_loader = DataLoader(
-        splits["val"],
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=config.get("pin_memory", False),
-    )
+    val_loader = DataLoader(splits["val"], shuffle=False, **loader_kwargs)
 
     print(
         f"Train samples: {len(splits['train'])}  |  Val samples: {len(splits['val'])}"
@@ -315,12 +319,20 @@ def _cli() -> dict:
     parser.add_argument("--max-frames", type=int, dest="max_frames",
                         help="With --hf-repo: download/use only the first N frames "
                              "(quick smoke tests without the full ~30 GB fetch).")
+    parser.add_argument("--hf-token", dest="hf_token",
+                        help="HF auth token for the download (higher rate limits). "
+                             "Falls back to $HF_TOKEN / $HUGGING_FACE_HUB_TOKEN / "
+                             "cached login if omitted.")
     parser.add_argument("--data-zip", dest="data_zip")
     parser.add_argument("--data-metadata", dest="data_metadata")
     parser.add_argument("--beamform-params", dest="beamform_params")
     parser.add_argument("--run-name", dest="run_name")
     parser.add_argument("--vis-every", type=int, dest="vis_every")
+    parser.add_argument("--focal-zone", type=int, dest="focal_zone")
     parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument("--no-preload", action="store_true",
+                        help="Stream frames from zarr per access instead of "
+                             "preloading into RAM (use only if RAM-constrained).")
     parser.add_argument("--save-checkpoints", action="store_true",
                         dest="save_checkpoints")
     args = vars(parser.parse_args())
@@ -328,6 +340,8 @@ def _cli() -> dict:
     config = {k: v for k, v in args.items() if v not in (None, False)}
     if config.pop("no_wandb", None):
         config["use_wandb"] = False
+    if config.pop("no_preload", None):
+        config["preload"] = False
     return config
 
 

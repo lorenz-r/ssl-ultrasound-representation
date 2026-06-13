@@ -44,6 +44,10 @@ DEFAULT_METADATA_FILENAME = "ultrasonic_dataset.metadata.json"
 DEFAULT_ARRAY_NAME = "rf_iq"
 DEFAULT_CACHE_DIR = "/tmp/hf_cache"
 CACHE_ENV_VAR = "HF_CACHE_DIR"
+TOKEN_ENV_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")
+# The zarr is exploded into thousands of small per-chunk files, so download
+# speed is dominated by request concurrency rather than per-file bandwidth.
+DEFAULT_DOWNLOAD_WORKERS = 16
 
 
 # ── cache resolution ──────────────────────────────────────────────────────────
@@ -56,6 +60,23 @@ def resolve_cache_dir(explicit: str | os.PathLike | None = None) -> Path:
         path = Path(env_val) if env_val else Path(DEFAULT_CACHE_DIR)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+# ── auth resolution ───────────────────────────────────────────────────────────
+def resolve_hf_token(explicit: str | None = None) -> str | None:
+    """
+    Pick the HF auth token. Priority: explicit arg > $HF_TOKEN >
+    $HUGGING_FACE_HUB_TOKEN > None (huggingface_hub then falls back to a cached
+    `huggingface-cli login`). An authenticated download raises rate limits and
+    avoids anonymous throttling.
+    """
+    if explicit:
+        return explicit
+    for var in TOKEN_ENV_VARS:
+        val = os.environ.get(var)
+        if val:
+            return val
+    return None
 
 
 # ── low-level accessors ───────────────────────────────────────────────────────
@@ -85,10 +106,17 @@ def load_dataset(
     array_name: str = DEFAULT_ARRAY_NAME,
     repo_type: str = "dataset",
     max_frames: int | None = None,
+    token: str | None = None,
+    max_workers: int = DEFAULT_DOWNLOAD_WORKERS,
 ) -> tuple[zarr.Array, dict]:
     """
     Download the zarr (as a per-chunk directory tree) + metadata from a HF repo
     and open the array.
+
+    Authentication: `token` (or $HF_TOKEN / $HUGGING_FACE_HUB_TOKEN / cached
+    `huggingface-cli login`) is used for every request — authenticated downloads
+    get higher rate limits and avoid anonymous throttling. `max_workers` sets the
+    chunk-download concurrency (the array is thousands of small files).
 
     When `max_frames` is set, only the chunks belonging to the first `max_frames`
     frames are fetched (plus the structural `.zarray`/`.zgroup` files), so the
@@ -99,6 +127,7 @@ def load_dataset(
     array's declared shape but read back as the zarr fill value (0.0).
     """
     cache_root = resolve_cache_dir(cache_dir)
+    token = resolve_hf_token(token)
 
     # Metadata first: it tells us the total frame count and lets us build the
     # per-frame chunk globs before pulling any (potentially large) chunk files.
@@ -108,6 +137,7 @@ def load_dataset(
         revision=revision,
         cache_dir=str(cache_root),
         repo_type=repo_type,
+        token=token,
     )
     metadata = json.loads(Path(meta_path).read_text())
     n_total = int(metadata["shape"][0])
@@ -135,6 +165,8 @@ def load_dataset(
         revision=revision,
         cache_dir=str(cache_root),
         allow_patterns=allow_patterns,
+        token=token,
+        max_workers=max_workers,
     )
     arr = _open_zarr_dir_array(Path(snapshot_dir) / zarr_dirname, array_name=array_name)
 
@@ -300,8 +332,18 @@ class UltrasoundMAEDataset:
     """
     PyTorch Dataset returning one IQ-demodulated (unbeamformed) frame per item.
 
-    Item shape: `(transducers, scanlines, focal_zones, 2, samples)` — the full
-    per-frame 5D layout from the aggregator (the leading frame axis is indexed).
+    Item shape: `(transducers, scanlines, focal_zones, 2, samples)`, or with
+    `focal_zone` set, `(transducers, scanlines, 2, samples)` — the zone slice
+    is then taken *at the zarr level*, which reads only that zone's chunks
+    (the focal axis is chunked with size 1): 3x less I/O and decompression
+    than slicing after a full-frame read.
+
+    `preload=True` materialises all frames into one shared-memory tensor at
+    construction (the transform still runs per access). At ~63 MB/frame for a
+    single focal zone the whole dataset fits in CPU RAM, removing every
+    per-epoch disk read and Blosc decompression — without it the GPU idles on
+    chunk decompression, and each DataLoader worker respawn at an epoch
+    boundary pays the first-frame latency again.
 
     Pass `indices` from a split helper to materialise a sub-dataset without
     copying the zarr array.
@@ -313,6 +355,8 @@ class UltrasoundMAEDataset:
         indices: list[int] | None = None,
         dtype: Any = None,  # torch.float32 by default
         transform: Callable | None = None,
+        focal_zone: int | None = None,
+        preload: bool = False,
     ):
         import torch  # noqa: F401 — required, deferred to keep the module torch-free
 
@@ -323,14 +367,34 @@ class UltrasoundMAEDataset:
         )
         self.dtype = dtype if dtype is not None else torch.float32
         self.transform = transform
+        self.focal_zone = focal_zone
+
+        self._cache = None
+        if preload and self.indices:
+            from tqdm import tqdm
+
+            frames = [
+                self._read_frame(g)
+                for g in tqdm(self.indices, desc="Preloading frames", unit="frame")
+            ]
+            # One copy in shared memory, visible to all DataLoader workers.
+            self._cache = torch.stack(frames).share_memory_()
+
+    def _read_frame(self, global_idx: int):
+        if self.focal_zone is None:
+            frame = self.arr[global_idx]
+        else:
+            frame = self.arr[global_idx, :, :, self.focal_zone]
+        return self._torch.from_numpy(frame).to(self.dtype)
 
     def __len__(self) -> int:
         return len(self.indices)
 
     def __getitem__(self, i: int):
-        global_idx = self.indices[i]
-        frame = self.arr[global_idx]  # numpy ndarray
-        tensor = self._torch.from_numpy(frame).to(self.dtype)
+        if self._cache is not None:
+            tensor = self._cache[i]
+        else:
+            tensor = self._read_frame(self.indices[i])
         if self.transform is not None:
             tensor = self.transform(tensor)
         return tensor
@@ -347,6 +411,9 @@ def build_split_datasets(
     revision: str | None = None,
     transform: Callable | None = None,
     max_frames: int | None = None,
+    focal_zone: int | None = None,
+    preload: bool = False,
+    token: str | None = None,
     **split_kwargs,
 ) -> tuple[dict[str, UltrasoundMAEDataset], dict]:
     """
@@ -358,11 +425,21 @@ def build_split_datasets(
     `max_frames` (HF path only) caps how many frames are downloaded/opened — only
     those frames' chunks are fetched, and the splits are restricted to them.
 
+    `token` (HF path only) authenticates the download for higher rate limits;
+    falls back to $HF_TOKEN / $HUGGING_FACE_HUB_TOKEN / cached login when None.
+
+    `focal_zone` / `preload` are forwarded to `UltrasoundMAEDataset` (zarr-level
+    zone slicing and one-off in-RAM materialisation respectively).
+
     Extra kwargs are forwarded to the chosen split function.
     """
     if repo_id is not None:
         arr, meta = load_dataset(
-            repo_id, revision=revision, cache_dir=cache_dir, max_frames=max_frames
+            repo_id,
+            revision=revision,
+            cache_dir=cache_dir,
+            max_frames=max_frames,
+            token=token,
         )
     elif local_zip is not None and local_metadata is not None:
         if max_frames is not None:
@@ -385,7 +462,13 @@ def build_split_datasets(
         raise ValueError(f"unknown split_strategy: {split_strategy!r}")
 
     datasets = {
-        name: UltrasoundMAEDataset(arr, indices=ix, transform=transform)
+        name: UltrasoundMAEDataset(
+            arr,
+            indices=ix,
+            transform=transform,
+            focal_zone=focal_zone,
+            preload=preload,
+        )
         for name, ix in splits.items()
     }
     return datasets, meta
