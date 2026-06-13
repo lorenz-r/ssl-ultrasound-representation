@@ -116,7 +116,12 @@ def train(config: dict | None = None) -> dict:
     # only standardizes each frame.
     # ------------------------------------------------------------------
     data_source = (
-        {"repo_id": hf_repo, "max_frames": max_frames, "token": config.get("hf_token")}
+        {
+            "repo_id": hf_repo,
+            "max_frames": max_frames,
+            "token": config.get("hf_token"),
+            "download_workers": config.get("download_workers", 8),
+        }
         if hf_repo
         else {"local_zip": data_zip, "local_metadata": data_metadata}
     )
@@ -127,6 +132,10 @@ def train(config: dict | None = None) -> dict:
         transform=normalize_frame,
         focal_zone=config.get("focal_zone", 0),
         preload=preload,
+        # Shared memory is only needed when workers fork; it routes through
+        # /dev/shm (often capped < RAM), so avoid it in the common num_workers=0
+        # preload path to keep peak memory low.
+        share_memory=preload and num_workers > 0,
     )
 
     # Persistent workers avoid respawning (and re-reading the first frame) at
@@ -323,6 +332,9 @@ def _cli() -> dict:
                         help="HF auth token for the download (higher rate limits). "
                              "Falls back to $HF_TOKEN / $HUGGING_FACE_HUB_TOKEN / "
                              "cached login if omitted.")
+    parser.add_argument("--download-workers", type=int, dest="download_workers",
+                        help="Concurrent chunk downloads (default 8). Lower it "
+                             "(e.g. 4) if the transfer stalls periodically.")
     parser.add_argument("--data-zip", dest="data_zip")
     parser.add_argument("--data-metadata", dest="data_metadata")
     parser.add_argument("--beamform-params", dest="beamform_params")
