@@ -13,7 +13,9 @@ dependencies = [
   "numcodecs (<0.16)",
   "tqdm (>=4.68.1,<5.0.0)",
   "huggingface-hub (>=0.20)",
-  "torch (>=2.0)",
+  # PyTorch 2.4.1+cu118: last build with Pascal (sm_61) kernels (e.g. TITAN Xp).
+  # Install via: pip install torch==2.4.1+cu118 --index-url https://download.pytorch.org/whl/cu118
+  "torch (>=2.4.1,<2.5)",
   "wandb (>=0.27.2,<0.28.0)",
 ]
 

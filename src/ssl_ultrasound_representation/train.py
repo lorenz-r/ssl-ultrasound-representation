@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 import torch
@@ -51,6 +52,19 @@ def train(config: dict | None = None) -> dict:
     # latency at every epoch boundary, so default to 0 in that case.
     preload = config.get("preload", True)
     num_workers = config.get("num_workers", 0 if preload else 4)
+    # Don't over-subscribe: more workers than CPUs only adds spawn/contention
+    # overhead and triggers DataLoader's "excessive worker" warning. Use the
+    # cgroup's CPU allotment (sched_getaffinity) rather than os.cpu_count(),
+    # which reports the host's CPUs and over-counts inside a container (e.g. 12
+    # host CPUs vs a 4-CPU cgroup) — over-counting also under-clamps workers and
+    # invites the cgroup OOM killer, since each forked worker duplicates the
+    # preloaded shared cache's bookkeeping on top of a capped memory budget.
+    try:
+        cpu_count = len(os.sched_getaffinity(0))
+    except AttributeError:  # not available on all platforms (e.g. macOS)
+        cpu_count = os.cpu_count() or 1
+    if num_workers > cpu_count:
+        num_workers = cpu_count
     grad_clip = config.get("grad_clip", 1.0)
     device = config.get("device", default_device())
     mask_ratio = config.get("mask_ratio", 0.0)  # 0.0 = plain autoencoder
