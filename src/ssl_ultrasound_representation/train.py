@@ -19,8 +19,18 @@ from ssl_ultrasound_representation.utils.monitoring import TrainingMonitor
 
 
 def normalize_frame(t: torch.Tensor) -> torch.Tensor:
-    """Standardize one frame to zero mean / unit std (raw RF dynamic range is huge)."""
-    return (t - t.mean()) / (t.std() + 1e-8)
+    """Per-depth RMS normalization of one frame `(transducer, scanline, iq, sample)`.
+
+    Raw IQ decays ~2 orders of magnitude from shallow to deep, so a single
+    global std lets the shallow echoes own the reconstruction loss and the deep
+    field collapses toward zero (black beamform below the near field). Instead
+    we divide each depth sample by its RMS computed over (transducer, scanline,
+    iq) — one positive scalar per depth, applied to I and Q alike, so the
+    across-aperture phase is preserved exactly while every depth contributes
+    equally to the loss.
+    """
+    rms = t.pow(2).mean(dim=(0, 1, 2), keepdim=True).sqrt()  # (1, 1, 1, sample)
+    return t / (rms + 1e-8)
 
 
 # Focal-zone selection happens at the zarr level (focal_zone=0 in
@@ -368,19 +378,33 @@ def _cli() -> dict:
     parser.add_argument("--dim-feedforward", type=int, dest="dim_feedforward")
     parser.add_argument("--num-workers", type=int, dest="num_workers")
     parser.add_argument("--device")
-    parser.add_argument("--hf-repo", dest="hf_repo",
-                        help="HF dataset repo id (e.g. user/ssl-ultrasound-rats); "
-                             "falls back to local data/processed/ files if omitted.")
-    parser.add_argument("--max-frames", type=int, dest="max_frames",
-                        help="With --hf-repo: download/use only the first N frames "
-                             "(quick smoke tests without the full ~30 GB fetch).")
-    parser.add_argument("--hf-token", dest="hf_token",
-                        help="HF auth token for the download (higher rate limits). "
-                             "Falls back to $HF_TOKEN / $HUGGING_FACE_HUB_TOKEN / "
-                             "cached login if omitted.")
-    parser.add_argument("--download-workers", type=int, dest="download_workers",
-                        help="Concurrent chunk downloads (default 8). Lower it "
-                             "(e.g. 4) if the transfer stalls periodically.")
+    parser.add_argument(
+        "--hf-repo",
+        dest="hf_repo",
+        help="HF dataset repo id (e.g. user/ssl-ultrasound-rats); "
+        "falls back to local data/processed/ files if omitted.",
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        dest="max_frames",
+        help="With --hf-repo: download/use only the first N frames "
+        "(quick smoke tests without the full ~30 GB fetch).",
+    )
+    parser.add_argument(
+        "--hf-token",
+        dest="hf_token",
+        help="HF auth token for the download (higher rate limits). "
+        "Falls back to $HF_TOKEN / $HUGGING_FACE_HUB_TOKEN / "
+        "cached login if omitted.",
+    )
+    parser.add_argument(
+        "--download-workers",
+        type=int,
+        dest="download_workers",
+        help="Concurrent chunk downloads (default 8). Lower it "
+        "(e.g. 4) if the transfer stalls periodically.",
+    )
     parser.add_argument("--data-zip", dest="data_zip")
     parser.add_argument("--data-metadata", dest="data_metadata")
     parser.add_argument("--beamform-params", dest="beamform_params")
@@ -388,13 +412,20 @@ def _cli() -> dict:
     parser.add_argument("--vis-every", type=int, dest="vis_every")
     parser.add_argument("--focal-zone", type=int, dest="focal_zone")
     parser.add_argument("--no-wandb", action="store_true")
-    parser.add_argument("--no-preload", action="store_true",
-                        help="Stream frames from zarr per access instead of "
-                             "preloading into RAM (use only if RAM-constrained).")
-    parser.add_argument("--no-amp", action="store_true",
-                        help="Disable mixed precision (on by default on CUDA).")
-    parser.add_argument("--save-checkpoints", action="store_true",
-                        dest="save_checkpoints")
+    parser.add_argument(
+        "--no-preload",
+        action="store_true",
+        help="Stream frames from zarr per access instead of "
+        "preloading into RAM (use only if RAM-constrained).",
+    )
+    parser.add_argument(
+        "--no-amp",
+        action="store_true",
+        help="Disable mixed precision (on by default on CUDA).",
+    )
+    parser.add_argument(
+        "--save-checkpoints", action="store_true", dest="save_checkpoints"
+    )
     args = vars(parser.parse_args())
 
     config = {k: v for k, v in args.items() if v not in (None, False)}
