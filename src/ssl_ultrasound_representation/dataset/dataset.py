@@ -45,9 +45,12 @@ DEFAULT_ARRAY_NAME = "rf_iq"
 DEFAULT_CACHE_DIR = "/tmp/hf_cache"
 CACHE_ENV_VAR = "HF_CACHE_DIR"
 TOKEN_ENV_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")
-# The zarr is exploded into thousands of small per-chunk files, so download
-# speed is dominated by request concurrency rather than per-file bandwidth.
-DEFAULT_DOWNLOAD_WORKERS = 16
+# The zarr is exploded into thousands of small per-chunk files. Each file costs
+# a metadata/HEAD request before its bytes transfer, so too many concurrent
+# workers trip the Hub's per-IP request-rate limit -> 429 -> client backoff,
+# which shows up as periodic multi-second stalls. 8 (the library default) is a
+# safe middle ground; lower it further if stalls persist on a shared node.
+DEFAULT_DOWNLOAD_WORKERS = 8
 
 
 # ── cache resolution ──────────────────────────────────────────────────────────
@@ -357,6 +360,7 @@ class UltrasoundMAEDataset:
         transform: Callable | None = None,
         focal_zone: int | None = None,
         preload: bool = False,
+        share_memory: bool = False,
     ):
         import torch  # noqa: F401 — required, deferred to keep the module torch-free
 
@@ -373,12 +377,24 @@ class UltrasoundMAEDataset:
         if preload and self.indices:
             from tqdm import tqdm
 
-            frames = [
-                self._read_frame(g)
-                for g in tqdm(self.indices, desc="Preloading frames", unit="frame")
-            ]
-            # One copy in shared memory, visible to all DataLoader workers.
-            self._cache = torch.stack(frames).share_memory_()
+            # Preallocate the destination and fill it frame-by-frame: peak RAM is
+            # one copy of the data plus a single frame. (A list + torch.stack
+            # would transiently hold two full copies and OOM on a capped node.)
+            # share_memory_() is only needed when DataLoader workers fork, and it
+            # routes through /dev/shm — often a tmpfs capped at ~50% of RAM — so
+            # it stays opt-in rather than the default.
+            n = len(self.indices)
+            first = self._read_frame(self.indices[0])
+            cache = torch.empty((n, *first.shape), dtype=first.dtype)
+            if share_memory:
+                cache.share_memory_()
+            cache[0] = first
+            del first
+            for i in tqdm(
+                range(1, n), desc="Preloading frames", unit="frame", initial=1, total=n
+            ):
+                cache[i] = self._read_frame(self.indices[i])
+            self._cache = cache
 
     def _read_frame(self, global_idx: int):
         if self.focal_zone is None:
@@ -413,7 +429,9 @@ def build_split_datasets(
     max_frames: int | None = None,
     focal_zone: int | None = None,
     preload: bool = False,
+    share_memory: bool = False,
     token: str | None = None,
+    download_workers: int = DEFAULT_DOWNLOAD_WORKERS,
     **split_kwargs,
 ) -> tuple[dict[str, UltrasoundMAEDataset], dict]:
     """
@@ -428,8 +446,13 @@ def build_split_datasets(
     `token` (HF path only) authenticates the download for higher rate limits;
     falls back to $HF_TOKEN / $HUGGING_FACE_HUB_TOKEN / cached login when None.
 
-    `focal_zone` / `preload` are forwarded to `UltrasoundMAEDataset` (zarr-level
-    zone slicing and one-off in-RAM materialisation respectively).
+    `download_workers` (HF path only) caps chunk-download concurrency; lower it
+    if the transfer stalls periodically (Hub request-rate throttling).
+
+    `focal_zone` / `preload` / `share_memory` are forwarded to
+    `UltrasoundMAEDataset` (zarr-level zone slicing, one-off in-RAM
+    materialisation, and whether that buffer goes in shared memory — only set
+    `share_memory` when DataLoader workers will fork).
 
     Extra kwargs are forwarded to the chosen split function.
     """
@@ -440,6 +463,7 @@ def build_split_datasets(
             cache_dir=cache_dir,
             max_frames=max_frames,
             token=token,
+            max_workers=download_workers,
         )
     elif local_zip is not None and local_metadata is not None:
         if max_frames is not None:
@@ -468,6 +492,7 @@ def build_split_datasets(
             transform=transform,
             focal_zone=focal_zone,
             preload=preload,
+            share_memory=share_memory,
         )
         for name, ix in splits.items()
     }
