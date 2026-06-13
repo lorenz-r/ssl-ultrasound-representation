@@ -53,6 +53,14 @@ def train(config: dict | None = None) -> dict:
     num_workers = config.get("num_workers", 0 if preload else 4)
     grad_clip = config.get("grad_clip", 1.0)
     device = config.get("device", default_device())
+    device_type = torch.device(device).type
+    if device == "cuda":
+        # Fixed token/patch shapes — let cuDNN lock in the fastest conv algos.
+        torch.backends.cudnn.benchmark = True
+    # Mixed precision: real throughput + memory win on CUDA (frees room for
+    # bigger batches); default off elsewhere (MPS/CPU autocast is flaky/slow).
+    use_amp = config.get("amp", device == "cuda")
+    log_every = config.get("log_every", 10)  # progress-bar sync cadence (steps)
     mask_ratio = config.get("mask_ratio", 0.0)  # 0.0 = plain autoencoder
     loss_on = config.get("loss_on", "all")  # "all" keeps every patch supervised
     save_checkpoints = config.get("save_checkpoints", False)
@@ -83,10 +91,12 @@ def train(config: dict | None = None) -> dict:
     n_depth_windows = n_samples // depth_window
     n_transducer_groups = n_transducers // transducer_window
 
-    embed_dim = config.get("embed_dim", 128)
+    embed_dim = config.get("embed_dim", 256)
 
     # ------------------------------------------------------------------
-    # Model
+    # Model — ViT-S-ish encoder; sized for the 24 GB GPU rather than the
+    # laptop. Watch val loss: with ~140 training frames a larger model can
+    # overfit, so capacity is config-overridable.
     # ------------------------------------------------------------------
     model = SignalMAE(
         n_transducers=n_transducers,
@@ -95,12 +105,12 @@ def train(config: dict | None = None) -> dict:
         n_samples=n_samples,
         depth_window=depth_window,
         embed_dim=embed_dim,
-        encoder_depth=config.get("encoder_depth", 4),
+        encoder_depth=config.get("encoder_depth", 8),
         encoder_heads=config.get("encoder_heads", 8),
-        decoder_embed_dim=config.get("decoder_embed_dim", 64),
-        decoder_depth=config.get("decoder_depth", 2),
-        decoder_heads=config.get("decoder_heads", 4),
-        dim_feedforward=config.get("dim_feedforward", 512),
+        decoder_embed_dim=config.get("decoder_embed_dim", 128),
+        decoder_depth=config.get("decoder_depth", 4),
+        decoder_heads=config.get("decoder_heads", 8),
+        dim_feedforward=config.get("dim_feedforward", 1024),
         mask_ratio=mask_ratio,
     ).to(device)
 
@@ -174,6 +184,9 @@ def train(config: dict | None = None) -> dict:
             "depth_window": depth_window,
             "transducer_window": transducer_window,
             "embed_dim": embed_dim,
+            "encoder_depth": config.get("encoder_depth", 8),
+            "decoder_depth": config.get("decoder_depth", 4),
+            "amp": use_amp,
             "num_tokens": model.num_tokens,
             "patch_dim": model.patch_dim,
             "model_params": sum(p.numel() for p in model.parameters()),
@@ -199,6 +212,7 @@ def train(config: dict | None = None) -> dict:
     # Optimiser + LR schedule (linear warmup -> cosine decay, per step)
     # ------------------------------------------------------------------
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scaler = torch.amp.GradScaler(device_type, enabled=use_amp)
 
     steps_per_epoch = max(len(train_loader), 1)
     total_steps = epochs * steps_per_epoch
@@ -222,8 +236,10 @@ def train(config: dict | None = None) -> dict:
 
     for epoch in range(1, epochs + 1):
         model.train()
-        train_loss = 0.0
-        grad_norm_sum = 0.0
+        # Accumulate on-device and sync once per epoch — a per-step .item()
+        # would stall the pipeline on a small, launch-bound model.
+        train_loss = torch.zeros((), device=device)
+        grad_norm_sum = torch.zeros((), device=device)
         train_batches = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
@@ -231,38 +247,44 @@ def train(config: dict | None = None) -> dict:
             # batch: (B, transducer, scanline, iq, sample) — preprocessed
             x = batch.to(device, non_blocking=True)
 
-            optimizer.zero_grad()
-            pred, target, mask = model(x, pos_embed)
-            loss = calculate_loss(pred, target, mask, loss_on=loss_on)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type=device_type, enabled=use_amp):
+                pred, target, mask = model(x, pos_embed)
+                loss = calculate_loss(pred, target, mask, loss_on=loss_on)
 
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)  # unscale so grad clipping sees true norms
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
 
-            train_loss += loss.item()
-            grad_norm_sum += grad_norm.item()
+            train_loss += loss.detach()
+            grad_norm_sum += grad_norm.detach()
             train_batches += 1
-            pbar.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0])
+            if train_batches % log_every == 0:
+                pbar.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0])
 
-        avg_train_loss = train_loss / max(train_batches, 1)
+        avg_train_loss = (train_loss / max(train_batches, 1)).item()
+        avg_grad_norm = (grad_norm_sum / max(train_batches, 1)).item()
 
         # ------------------------------------------------------------------
         # Validation
         # ------------------------------------------------------------------
         model.eval()
-        val_loss = 0.0
+        val_loss = torch.zeros((), device=device)
         val_batches = 0
 
         with torch.no_grad():
             for batch in val_loader:
                 x = batch.to(device, non_blocking=True)
-                pred, target, mask = model(x, pos_embed)
-                loss = calculate_loss(pred, target, mask, loss_on=loss_on)
-                val_loss += loss.item()
+                with torch.autocast(device_type=device_type, enabled=use_amp):
+                    pred, target, mask = model(x, pos_embed)
+                    loss = calculate_loss(pred, target, mask, loss_on=loss_on)
+                val_loss += loss.detach()
                 val_batches += 1
 
-        avg_val_loss = val_loss / val_batches if val_batches else float("nan")
+        avg_val_loss = (val_loss / val_batches).item() if val_batches else float("nan")
 
         print(
             f"Epoch {epoch:3d}  |  "
@@ -277,7 +299,7 @@ def train(config: dict | None = None) -> dict:
                 "train/loss": avg_train_loss,
                 "val/loss": avg_val_loss,
                 "train/lr": scheduler.get_last_lr()[0],
-                "train/grad_norm": grad_norm_sum / max(train_batches, 1),
+                "train/grad_norm": avg_grad_norm,
             },
         )
         if epoch == 1 or epoch % vis_every == 0 or epoch == epochs:
@@ -320,6 +342,10 @@ def _cli() -> dict:
     parser.add_argument("--depth-window", type=int, dest="depth_window")
     parser.add_argument("--transducer-window", type=int, dest="transducer_window")
     parser.add_argument("--embed-dim", type=int, dest="embed_dim")
+    parser.add_argument("--encoder-depth", type=int, dest="encoder_depth")
+    parser.add_argument("--decoder-depth", type=int, dest="decoder_depth")
+    parser.add_argument("--decoder-embed-dim", type=int, dest="decoder_embed_dim")
+    parser.add_argument("--dim-feedforward", type=int, dest="dim_feedforward")
     parser.add_argument("--num-workers", type=int, dest="num_workers")
     parser.add_argument("--device")
     parser.add_argument("--hf-repo", dest="hf_repo",
@@ -345,6 +371,8 @@ def _cli() -> dict:
     parser.add_argument("--no-preload", action="store_true",
                         help="Stream frames from zarr per access instead of "
                              "preloading into RAM (use only if RAM-constrained).")
+    parser.add_argument("--no-amp", action="store_true",
+                        help="Disable mixed precision (on by default on CUDA).")
     parser.add_argument("--save-checkpoints", action="store_true",
                         dest="save_checkpoints")
     args = vars(parser.parse_args())
@@ -354,6 +382,8 @@ def _cli() -> dict:
         config["use_wandb"] = False
     if config.pop("no_preload", None):
         config["preload"] = False
+    if config.pop("no_amp", None):
+        config["amp"] = False
     return config
 
 
