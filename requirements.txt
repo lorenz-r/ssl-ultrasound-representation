@@ -6,7 +6,8 @@ zarr>=2.18,<3
 numcodecs>=0.13,<0.16
 tqdm>=4.65
 huggingface_hub>=0.20
-# torch is consumed only by the PyTorch wrapper in src/dataset.py (lazy import).
-# Install the variant that matches your accelerator (CUDA / MPS / CPU).
-torch>=2.0
+# PyTorch 2.4.1+cu118 is the last build that includes Pascal (sm_61) kernels
+# (e.g. TITAN Xp). PyTorch 2.5+ with CUDA 12.x/13.x dropped sm_61 support.
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.4.1+cu118
 wandb>=0.27,<0.28
