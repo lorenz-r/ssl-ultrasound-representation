@@ -70,8 +70,19 @@ class SignalMAE(nn.Module):
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.GELU(),
         )
+        # Record the spatial size after each conv so the decoder's transpose
+        # stack can invert the exact down-sampling (output_padding picked per
+        # axis), independent of the chosen window sizes.
         with torch.no_grad():
-            feat = self.patch_conv(torch.zeros(1, 2, transducer_window, depth_window))
+            sizes = [(transducer_window, depth_window)]
+            t = torch.zeros(1, 2, transducer_window, depth_window)
+            for m in self.patch_conv:
+                t = m(t)
+                if isinstance(m, nn.Conv2d):
+                    sizes.append(tuple(t.shape[-2:]))
+            feat = t
+        self._feat_chw = tuple(feat.shape[1:])  # (C, H, W) at the bottleneck
+        self._conv_sizes = sizes  # [(tw, w), s1, s2, s3]
         self.patch_proj = nn.Linear(feat.flatten(1).shape[1], embed_dim)
 
         encoder_layer = nn.TransformerEncoderLayer(
@@ -105,7 +116,32 @@ class SignalMAE(nn.Module):
         self.decoder = nn.TransformerEncoder(decoder_layer, num_layers=decoder_depth)
         self.decoder_norm = nn.LayerNorm(decoder_embed_dim)
 
-        self.output_projection = nn.Linear(decoder_embed_dim, self.patch_dim)
+        # Conv-transpose reconstruction head: project each decoder token back to
+        # the bottleneck feature map, then up-sample with a transpose stack that
+        # mirrors patch_conv. A flat Linear(decoder_dim -> patch_dim) can only
+        # emit the smooth conditional mean of an oscillatory IQ patch (blurry,
+        # speckle-free); a conv decoder can synthesize the local oscillation.
+        self.decoder_unproj = nn.Linear(decoder_embed_dim, feat.flatten(1).shape[1])
+        # Transpose specs mirror patch_conv (kernel, stride, padding); channels
+        # reversed, terminating at 2 (IQ). output_padding recovers the exact size.
+        deconv_specs = [
+            (64, 32, 3, 2, 1),
+            (32, 16, 3, 2, 1),
+            (16, 2, 5, 2, 2),
+        ]
+        deconv_layers = []
+        for i, (c_in, c_out, k, s, p) in enumerate(deconv_specs):
+            in_hw = self._conv_sizes[-(i + 1)]
+            out_hw = self._conv_sizes[-(i + 2)]
+            out_pad = tuple(
+                out_hw[d] - ((in_hw[d] - 1) * s - 2 * p + k) for d in range(2)
+            )
+            deconv_layers.append(
+                nn.ConvTranspose2d(c_in, c_out, k, s, p, output_padding=out_pad)
+            )
+            if i < len(deconv_specs) - 1:
+                deconv_layers.append(nn.GELU())
+        self.patch_deconv = nn.Sequential(*deconv_layers)
 
     def forward(self, x, pos_embed):
         """
@@ -148,9 +184,12 @@ class SignalMAE(nn.Module):
             )
         y = y + self.decoder_pos_embed
 
-        # --- 5. DECODER + output projection ---
+        # --- 5. DECODER + conv-transpose reconstruction head ---
         y = self.decoder_norm(self.decoder(y))
-        pred = self.output_projection(y)
+        y = self.decoder_unproj(y)  # (B, L, C*H*W)
+        y = y.reshape(B * L, *self._feat_chw)
+        y = self.patch_deconv(y)  # (B*L, 2, tw, w)
+        pred = y.reshape(B, L, self.patch_dim)
 
         return pred, target, mask
 
