@@ -142,21 +142,25 @@ def train(config: dict | None = None) -> dict:
     # laptop. Watch val loss: with ~140 training frames a larger model can
     # overfit, so capacity is config-overridable.
     # ------------------------------------------------------------------
-    model = SignalMAE(
-        n_transducers=n_transducers,
-        transducer_window=transducer_window,
-        n_scanlines=n_scanlines,
-        n_samples=n_samples,
-        depth_window=depth_window,
-        embed_dim=embed_dim,
-        encoder_depth=config.get("encoder_depth", 8),
-        encoder_heads=config.get("encoder_heads", 8),
-        decoder_embed_dim=config.get("decoder_embed_dim", 128),
-        decoder_depth=config.get("decoder_depth", 4),
-        decoder_heads=config.get("decoder_heads", 8),
-        dim_feedforward=config.get("dim_feedforward", 1024),
-        mask_ratio=mask_ratio,
-    ).to(device)
+    # Explicit, self-contained model spec — saved into every checkpoint so the
+    # eval suite can rebuild the exact architecture (and its positional grid)
+    # from the checkpoint alone, without the training config.
+    model_config = {
+        "n_transducers": n_transducers,
+        "transducer_window": transducer_window,
+        "n_scanlines": n_scanlines,
+        "n_samples": n_samples,
+        "depth_window": depth_window,
+        "embed_dim": embed_dim,
+        "encoder_depth": config.get("encoder_depth", 8),
+        "encoder_heads": config.get("encoder_heads", 8),
+        "decoder_embed_dim": config.get("decoder_embed_dim", 128),
+        "decoder_depth": config.get("decoder_depth", 4),
+        "decoder_heads": config.get("decoder_heads", 8),
+        "dim_feedforward": config.get("dim_feedforward", 1024),
+        "mask_ratio": mask_ratio,
+    }
+    model = SignalMAE(**model_config).to(device)
 
     # Encoder positional encoding over the (scanline, transducer-group, depth-window) grid
     pos_embed = build_grid_positional_encoding(
@@ -355,6 +359,7 @@ def train(config: dict | None = None) -> dict:
         if val_batches and avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             if save_checkpoints:
+                ckpt_path = "checkpoints/best_mae_checkpoint.pt"
                 torch.save(
                     {
                         "epoch": epoch,
@@ -363,8 +368,23 @@ def train(config: dict | None = None) -> dict:
                         "train_loss": avg_train_loss,
                         "val_loss": avg_val_loss,
                         "config": config,
+                        # Self-contained spec for standalone reload (eval suite).
+                        "model_config": model_config,
                     },
-                    "checkpoints/best_mae_checkpoint.pt",
+                    ckpt_path,
+                )
+                # Version the best checkpoint in wandb so the eval suite can pull
+                # it by alias ("best" / "<run>:latest") instead of a local path.
+                monitor.log_checkpoint(
+                    ckpt_path,
+                    name="mae-checkpoint",
+                    aliases=["best", f"epoch-{epoch}"],
+                    metadata={
+                        "epoch": epoch,
+                        "val_loss": avg_val_loss,
+                        "train_loss": avg_train_loss,
+                        "model_config": model_config,
+                    },
                 )
 
     monitor.finish(summary={"best_val_loss": best_val_loss})

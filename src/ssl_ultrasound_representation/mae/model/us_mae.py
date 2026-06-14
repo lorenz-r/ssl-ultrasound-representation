@@ -193,6 +193,38 @@ class SignalMAE(nn.Module):
 
         return pred, target, mask
 
+    @torch.no_grad()
+    def encode(self, x, pos_embed, pool: str = "mean"):
+        """Extract encoder latents for representation analysis.
+
+        Runs the embedding + encoder only — no masking (every token is kept,
+        regardless of ``self.mask_ratio``) and no decoder — so the result is the
+        full, deterministic representation of a frame.
+
+        Args:
+            x: frame batch (B, transducer, scanline, iq, sample), single focal
+               zone already selected (same layout as ``forward``).
+            pos_embed: (num_tokens, embed_dim) encoder positional encoding.
+            pool: "mean" -> (B, embed_dim) frame-level latent (mean over tokens);
+                  "none" -> (B, num_tokens, embed_dim) per-token latents.
+
+        Returns:
+            Latent tensor as described by ``pool``.
+        """
+        patches = self.patchify(x)
+        B, L = patches.shape[:2]
+        tok = self.patch_conv(
+            patches.reshape(B * L, 2, self.transducer_window, self.depth_window)
+        )
+        tok = self.patch_proj(tok.flatten(1)).view(B, L, self.embed_dim)
+        tok = tok + pos_embed.unsqueeze(0).to(tok.dtype)
+        z = self.encoder_norm(self.encoder(tok))  # (B, L, embed_dim)
+        if pool == "mean":
+            return z.mean(dim=1)
+        if pool == "none":
+            return z
+        raise ValueError(f"unknown pool: {pool!r} (use 'mean' or 'none')")
+
     def patchify(self, x):
         """
         (B, T, Sc, IQ, D) -> (B, Sc*G*W, IQ, tw, w)

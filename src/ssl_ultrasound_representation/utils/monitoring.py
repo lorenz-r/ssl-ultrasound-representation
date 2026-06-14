@@ -139,6 +139,31 @@ class TrainingMonitor:
         fig.tight_layout()
         return fig
 
+    # ── checkpoints ──────────────────────────────────────────────────────────
+    def log_checkpoint(
+        self,
+        path: str | Path,
+        *,
+        name: str = "mae-checkpoint",
+        aliases: list[str] | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        """Upload a checkpoint file as a versioned wandb model artifact.
+
+        No-op if wandb is disabled. `aliases` (e.g. ["best", "epoch-120"]) make
+        a version easy to fetch later; the latest logged version is always
+        reachable as "<name>:latest". `metadata` is stored on the artifact for
+        provenance (epoch, losses, model config) so the eval suite can rebuild
+        the model without the training config on hand.
+        """
+        if self.run is None:
+            return
+        artifact = self._wandb.Artifact(
+            name=name, type="model", metadata=metadata or {}
+        )
+        artifact.add_file(str(path))
+        self.run.log_artifact(artifact, aliases=aliases or ["latest"])
+
     # ── lifecycle ────────────────────────────────────────────────────────────
     def finish(self, summary: dict | None = None) -> None:
         if self.run is not None:
