@@ -32,7 +32,8 @@ class SignalMAE(nn.Module):
                  decoder_depth=2,
                  decoder_heads=4,
                  dim_feedforward=512,
-                 mask_ratio=0.0):
+                 mask_ratio=0.0,
+                 pos_in_encoder=True):
         super().__init__()
         assert n_samples % depth_window == 0, (
             f"n_samples ({n_samples}) must be divisible by depth_window ({depth_window})"
@@ -57,6 +58,10 @@ class SignalMAE(nn.Module):
         self.embed_dim = embed_dim
         self.decoder_embed_dim = decoder_embed_dim
         self.mask_ratio = mask_ratio
+        # When False, positional encoding is supplied only to the decoder, so the
+        # encoder must build content-only embeddings (it cannot lean on token
+        # coordinates). The decoder still places patches via decoder_pos_embed.
+        self.pos_in_encoder = pos_in_encoder
 
         # -------------------------------------------------------------------------
         # 1. MAE ENCODER MODULES
@@ -165,7 +170,8 @@ class SignalMAE(nn.Module):
             patches.reshape(B * L, 2, self.transducer_window, self.depth_window)
         )
         tok = self.patch_proj(tok.flatten(1)).view(B, L, self.embed_dim)
-        tok = tok + pos_embed.unsqueeze(0).to(tok.dtype)
+        if self.pos_in_encoder:
+            tok = tok + pos_embed.unsqueeze(0).to(tok.dtype)
 
         # --- 2. Random masking over the token grid ---
         tok, mask, ids_restore, len_keep = self.random_masking(tok, self.mask_ratio)
@@ -217,7 +223,8 @@ class SignalMAE(nn.Module):
             patches.reshape(B * L, 2, self.transducer_window, self.depth_window)
         )
         tok = self.patch_proj(tok.flatten(1)).view(B, L, self.embed_dim)
-        tok = tok + pos_embed.unsqueeze(0).to(tok.dtype)
+        if self.pos_in_encoder:
+            tok = tok + pos_embed.unsqueeze(0).to(tok.dtype)
         z = self.encoder_norm(self.encoder(tok))  # (B, L, embed_dim)
         if pool == "mean":
             return z.mean(dim=1)

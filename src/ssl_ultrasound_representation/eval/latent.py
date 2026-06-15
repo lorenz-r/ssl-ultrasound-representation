@@ -81,12 +81,67 @@ def load_checkpoint(
     # weights_only=False: our checkpoints store python dicts (config /
     # model_config) alongside the tensors, which the safe loader rejects.
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    if "model_config" not in ckpt:
-        raise KeyError(
-            "checkpoint has no 'model_config' — it predates self-contained "
-            "checkpoints; retrain or add the spec manually."
-        )
     return ckpt
+
+
+def infer_model_config(ckpt: dict) -> dict:
+    """The model spec needed to rebuild the encoder.
+
+    Uses the self-contained ``model_config`` when present; otherwise (older
+    checkpoints) reconstructs it from state-dict shapes plus the saved training
+    config. Most dims are read straight from the weights; the head counts and
+    window sizes — which don't change tensor shapes — come from the training
+    config, falling back to train.py's defaults, and are cross-checked against
+    the checkpoint's token grid so a wrong guess fails loudly.
+    """
+    if "model_config" in ckpt:
+        return ckpt["model_config"]
+
+    import re
+
+    sd = ckpt["model_state_dict"]
+    cfg = ckpt.get("config", {})
+
+    def n_layers(prefix: str) -> int:
+        return max(
+            int(re.search(rf"{prefix}\.layers\.(\d+)\.", k).group(1))
+            for k in sd if k.startswith(f"{prefix}.layers.")
+        ) + 1
+
+    # Data geometry is fixed by the pipeline (hardcoded in train.py).
+    n_transducers, n_scanlines, n_samples = 192, 192, 215
+    transducer_window = cfg.get("transducer_window", 64)
+    depth_window = cfg.get("depth_window", 43)
+    num_tokens = sd["decoder_pos_embed"].shape[1]
+    expected = (
+        n_scanlines
+        * (n_transducers // transducer_window)
+        * (n_samples // depth_window)
+    )
+    if expected != num_tokens:
+        raise ValueError(
+            f"inferred token grid ({expected}) != checkpoint num_tokens "
+            f"({num_tokens}); this checkpoint used non-default window sizes — "
+            f"set transducer_window/depth_window in its training config."
+        )
+
+    return {
+        "n_transducers": n_transducers,
+        "transducer_window": transducer_window,
+        "n_scanlines": n_scanlines,
+        "n_samples": n_samples,
+        "depth_window": depth_window,
+        "embed_dim": sd["encoder_norm.weight"].shape[0],
+        "encoder_depth": n_layers("encoder"),
+        "encoder_heads": cfg.get("encoder_heads", 8),
+        "decoder_embed_dim": sd["decoder_norm.weight"].shape[0],
+        "decoder_depth": n_layers("decoder"),
+        "decoder_heads": cfg.get("decoder_heads", 8),
+        "dim_feedforward": sd["encoder.layers.0.linear1.weight"].shape[0],
+        "mask_ratio": cfg.get("mask_ratio", 0.0),
+        # Doesn't change tensor shapes; older runs all used the default (True).
+        "pos_in_encoder": cfg.get("pos_in_encoder", True),
+    }
 
 
 def build_model(model_config: dict, device: str) -> SignalMAE:
@@ -194,6 +249,33 @@ def project(feats: np.ndarray, method: str, seed: int = 0) -> np.ndarray:
     raise ValueError(f"unknown method {method!r}")
 
 
+def regress_out(
+    feats: np.ndarray, label_dict: dict, factors: list[str]
+) -> tuple[np.ndarray, float]:
+    """Linearly remove the given (categorical) position factors from features.
+
+    Fits ``feats ~ [intercept, one-hot(factor) ...]`` by least squares and
+    returns the residual plus the fraction of variance the position factors
+    explained. One-hot (not raw index) because the latent's dependence on a
+    coordinate is not linear in the index — but it *is* additive per axis (that
+    is how the positional encoding was injected), so per-level dummies remove it
+    cleanly. What remains is the content the position shell was hiding.
+    """
+    cols = [np.ones((feats.shape[0], 1))]
+    for f in factors:
+        v = label_dict[f]
+        cats = np.unique(v)
+        cols.append((v[:, None] == cats[None, :]).astype(float))
+    X = np.concatenate(cols, axis=1)
+    beta, *_ = np.linalg.lstsq(X, feats, rcond=None)
+    pred = X @ beta
+    resid = feats - pred
+    ss_res = float(((feats - pred) ** 2).sum())
+    ss_tot = float(((feats - feats.mean(0)) ** 2).sum())
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    return resid, r2
+
+
 # ── plotting ───────────────────────────────────────────────────────────────────
 def _scatter(ax, xy, values, name, point_size):
     is_categorical = values.dtype == object or values.dtype.kind in "US"
@@ -239,7 +321,7 @@ def plot_embedding(xy, label_dict, title, out_path, point_size):
 def run(config: dict) -> list[str]:
     device = config.get("device", default_device())
     ckpt = load_checkpoint(config.get("checkpoint"), config.get("artifact"))
-    model_config = ckpt["model_config"]
+    model_config = infer_model_config(ckpt)
     model = build_model(model_config, device)
     model.load_state_dict(ckpt["model_state_dict"])
     print(f"Loaded checkpoint (epoch {ckpt.get('epoch', '?')}, "
@@ -317,6 +399,24 @@ def run(config: dict) -> list[str]:
             + ("" if method == "pca" else f" (n={len(sub)})"),
             out_dir / f"token_{method}.png", point_size=4))
 
+    # Token latents with grid position (depth+aperture+scanline) linearly
+    # regressed out — exposes the content structure the positional shell hides.
+    if config.get("regress_position", True):
+        factors = ["depth_window", "aperture_group", "scanline"]
+        resid, r2 = regress_out(data["token_latents"], token_labels, factors)
+        print(f"Position {factors} explains {r2 * 100:.1f}% of token-latent "
+              f"variance; plotting the {(1 - r2) * 100:.1f}% residual.")
+        for method in methods:
+            feats = resid if method == "pca" else resid[sub]
+            tlabels = (token_labels if method == "pca"
+                       else {k: v[sub] for k, v in token_labels.items()})
+            xy = project(feats, method)
+            outputs.append(plot_embedding(
+                xy, tlabels,
+                f"token latents, position regressed out — {method.upper()}"
+                + ("" if method == "pca" else f" (n={len(sub)})"),
+                out_dir / f"token_{method}_residual.png", point_size=4))
+
     print("Wrote:")
     for p in outputs:
         print(f"  {p}")
@@ -352,10 +452,15 @@ def _cli() -> dict:
     p.add_argument("--focal-zone", type=int, dest="focal_zone")
     p.add_argument("--out", default="figures/latent")
     p.add_argument("--max-tsne-points", type=int, dest="max_tsne_points")
+    p.add_argument("--no-regress-position", action="store_true",
+                   help="skip the position-regressed-out token plots")
     p.add_argument("--device")
     p.add_argument("--log-wandb", action="store_true", dest="log_wandb")
     p.add_argument("--run-name", dest="run_name")
-    return {k: v for k, v in vars(p.parse_args()).items() if v not in (None, False)}
+    cfg = {k: v for k, v in vars(p.parse_args()).items() if v not in (None, False)}
+    if cfg.pop("no_regress_position", None):
+        cfg["regress_position"] = False
+    return cfg
 
 
 if __name__ == "__main__":
