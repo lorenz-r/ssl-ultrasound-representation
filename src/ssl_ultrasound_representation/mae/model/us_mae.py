@@ -1,5 +1,23 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+def _icnr_(weight: torch.Tensor, upscale: int) -> None:
+    """ICNR init for a sub-pixel conv (Aitken et al. 2017).
+
+    Initializes the conv that feeds PixelShuffle so the r^2 sub-pixels of each
+    output block start out identical — i.e. equivalent to nearest-neighbour
+    upsampling — which removes the checkerboard the sub-pixel conv would
+    otherwise show at init. weight: (c_out*r^2, c_in, kh, kw).
+    """
+    r2 = upscale * upscale
+    oc, ic, kh, kw = weight.shape
+    sub = torch.zeros(oc // r2, ic, kh, kw)
+    nn.init.kaiming_normal_(sub, nonlinearity="relu")
+    sub = sub.repeat_interleave(r2, dim=0)
+    with torch.no_grad():
+        weight.copy_(sub)
 
 
 class SignalMAE(nn.Module):
@@ -33,7 +51,8 @@ class SignalMAE(nn.Module):
                  decoder_heads=4,
                  dim_feedforward=512,
                  mask_ratio=0.0,
-                 pos_in_encoder=True):
+                 pos_in_encoder=True,
+                 decoder_head="resizeconv"):
         super().__init__()
         assert n_samples % depth_window == 0, (
             f"n_samples ({n_samples}) must be divisible by depth_window ({depth_window})"
@@ -121,32 +140,62 @@ class SignalMAE(nn.Module):
         self.decoder = nn.TransformerEncoder(decoder_layer, num_layers=decoder_depth)
         self.decoder_norm = nn.LayerNorm(decoder_embed_dim)
 
-        # Conv-transpose reconstruction head: project each decoder token back to
-        # the bottleneck feature map, then up-sample with a transpose stack that
-        # mirrors patch_conv. A flat Linear(decoder_dim -> patch_dim) can only
-        # emit the smooth conditional mean of an oscillatory IQ patch (blurry,
-        # speckle-free); a conv decoder can synthesize the local oscillation.
+        # Reconstruction head: project each decoder token back to the bottleneck
+        # feature map, then up-sample to the patch. A flat Linear(decoder_dim ->
+        # patch_dim) can only emit the smooth conditional mean of an oscillatory
+        # IQ patch (blurry, speckle-free); a conv decoder can synthesize detail.
+        self.decoder_head = decoder_head
         self.decoder_unproj = nn.Linear(decoder_embed_dim, feat.flatten(1).shape[1])
-        # Transpose specs mirror patch_conv (kernel, stride, padding); channels
-        # reversed, terminating at 2 (IQ). output_padding recovers the exact size.
-        deconv_specs = [
-            (64, 32, 3, 2, 1),
-            (32, 16, 3, 2, 1),
-            (16, 2, 5, 2, 2),
-        ]
-        deconv_layers = []
-        for i, (c_in, c_out, k, s, p) in enumerate(deconv_specs):
-            in_hw = self._conv_sizes[-(i + 1)]
-            out_hw = self._conv_sizes[-(i + 2)]
-            out_pad = tuple(
-                out_hw[d] - ((in_hw[d] - 1) * s - 2 * p + k) for d in range(2)
+        # Up-sampling target sizes mirror patch_conv in reverse; channels reverse
+        # patch_conv (64 -> 32 -> 16 -> 2 IQ).
+        up_sizes = [self._conv_sizes[-(i + 2)] for i in range(3)]
+        chans = [(64, 32), (32, 16), (16, 2)]
+
+        if decoder_head == "resizeconv":
+            # Resize-conv (interpolate + stride-1 conv): avoids the checkerboard
+            # grid that stride-2 ConvTranspose2d stamps into every patch
+            # regardless of content (Odena et al. 2016).
+            self.deconv_sizes = up_sizes
+            self.deconv_convs = nn.ModuleList(
+                nn.Conv2d(ci, co, kernel_size=3, stride=1, padding=1)
+                for ci, co in chans
             )
-            deconv_layers.append(
-                nn.ConvTranspose2d(c_in, c_out, k, s, p, output_padding=out_pad)
+        elif decoder_head == "pixelshuffle":
+            # Sub-pixel conv: a conv emits c_out * 2^2 channels which PixelShuffle
+            # rearranges (depth-to-space) to 2x resolution. No interpolation
+            # (so no smoothing bias — can emit sharp oscillation, good for IQ) and
+            # no uneven kernel overlap; ICNR init keeps it checkerboard-free.
+            # Three 2x stages overshoot the patch (sizes aren't exact /2), so the
+            # final output is cropped to (transducer_window, depth_window).
+            self.ps_shuffle = nn.PixelShuffle(2)
+            self.ps_convs = nn.ModuleList(
+                nn.Conv2d(ci, co * 4, kernel_size=3, stride=1, padding=1)
+                for ci, co in chans
             )
-            if i < len(deconv_specs) - 1:
-                deconv_layers.append(nn.GELU())
-        self.patch_deconv = nn.Sequential(*deconv_layers)
+            for conv in self.ps_convs:
+                _icnr_(conv.weight, upscale=2)
+                nn.init.zeros_(conv.bias)
+        elif decoder_head == "deconv":
+            # Legacy transpose stack (kept so older checkpoints still load).
+            deconv_layers = []
+            for i, ((c_in, c_out), (k, s, p)) in enumerate(
+                zip(chans, [(3, 2, 1), (3, 2, 1), (5, 2, 2)])
+            ):
+                in_hw = self._conv_sizes[-(i + 1)]
+                out_hw = up_sizes[i]
+                out_pad = tuple(
+                    out_hw[d] - ((in_hw[d] - 1) * s - 2 * p + k) for d in range(2)
+                )
+                deconv_layers.append(
+                    nn.ConvTranspose2d(c_in, c_out, k, s, p, output_padding=out_pad)
+                )
+                if i < len(chans) - 1:
+                    deconv_layers.append(nn.GELU())
+            self.patch_deconv = nn.Sequential(*deconv_layers)
+        else:
+            raise ValueError(
+                f"unknown decoder_head {decoder_head!r} (use 'resizeconv'/'deconv')"
+            )
 
     def forward(self, x, pos_embed):
         """
@@ -190,11 +239,25 @@ class SignalMAE(nn.Module):
             )
         y = y + self.decoder_pos_embed
 
-        # --- 5. DECODER + conv-transpose reconstruction head ---
+        # --- 5. DECODER + reconstruction head ---
         y = self.decoder_norm(self.decoder(y))
         y = self.decoder_unproj(y)  # (B, L, C*H*W)
         y = y.reshape(B * L, *self._feat_chw)
-        y = self.patch_deconv(y)  # (B*L, 2, tw, w)
+        if self.decoder_head == "resizeconv":
+            for i, (conv, size) in enumerate(zip(self.deconv_convs, self.deconv_sizes)):
+                y = F.interpolate(y, size=size, mode="bilinear", align_corners=False)
+                y = conv(y)
+                if i < len(self.deconv_convs) - 1:
+                    y = F.gelu(y)
+        elif self.decoder_head == "pixelshuffle":
+            for i, conv in enumerate(self.ps_convs):
+                y = self.ps_shuffle(conv(y))
+                if i < len(self.ps_convs) - 1:
+                    y = F.gelu(y)
+            tw, w = self._conv_sizes[0]  # crop the 2x overshoot to the patch
+            y = y[:, :, :tw, :w]
+        else:
+            y = self.patch_deconv(y)  # (B*L, 2, tw, w)
         pred = y.reshape(B, L, self.patch_dim)
 
         return pred, target, mask

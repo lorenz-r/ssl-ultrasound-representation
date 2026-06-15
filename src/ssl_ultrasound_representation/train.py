@@ -163,6 +163,8 @@ def train(config: dict | None = None) -> dict:
         # Positional encoding only in the decoder (encoder learns content-only
         # embeddings) when False — see --no-pos-in-encoder.
         "pos_in_encoder": config.get("pos_in_encoder", True),
+        # "resizeconv" (interpolate+conv, no checkerboard) or legacy "deconv".
+        "decoder_head": config.get("decoder_head", "resizeconv"),
     }
     model = SignalMAE(**model_config).to(device)
 
@@ -416,6 +418,12 @@ def _cli() -> dict:
     parser.add_argument("--batch-size", type=int, dest="batch_size")
     parser.add_argument("--lr", type=float)
     parser.add_argument("--mask-ratio", type=float, dest="mask_ratio")
+    parser.add_argument("--decoder-head",
+                        choices=["resizeconv", "pixelshuffle", "deconv"],
+                        dest="decoder_head",
+                        help="'resizeconv' (interpolate+conv, smooth), "
+                             "'pixelshuffle' (sub-pixel conv, sharp + no "
+                             "checkerboard), or legacy 'deconv' (transpose conv).")
     parser.add_argument("--loss-on", choices=["all", "masked"], dest="loss_on")
     parser.add_argument("--loss-type", choices=["mse", "iq"], dest="loss_type",
                         help="'mse' (squared complex error) or 'iq' (IQ-aware: "
