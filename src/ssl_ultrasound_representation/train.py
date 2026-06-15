@@ -392,7 +392,6 @@ def train(config: dict | None = None) -> dict:
                 # it by alias ("best" / "<run>:latest") instead of a local path.
                 monitor.log_checkpoint(
                     ckpt_path,
-                    name="mae-checkpoint",
                     aliases=["best", f"epoch-{epoch}"],
                     metadata={
                         "epoch": epoch,
