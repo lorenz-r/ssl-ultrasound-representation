@@ -15,6 +15,7 @@ the cluster). Never commit the key.
 
 from __future__ import annotations
 
+import os
 import warnings
 from pathlib import Path
 
@@ -26,6 +27,16 @@ import numpy as np
 import torch
 
 from .beamform import ZoneBeamformer
+
+# wandb caches a copy of every uploaded artifact (each checkpoint is the full
+# model+optimizer state) under WANDB_CACHE_DIR and stages artifacts under
+# WANDB_DATA_DIR; both default to ~/.cache/wandb. In the enroot training
+# container ~ lives on a RAM-backed overlay, so that cache silently grows to
+# many GB of resident RAM that survive the run and eat into the OOM budget.
+# Default both to local scratch (/tmp is ext4 here, like HF_CACHE_DIR); an
+# explicitly set env var still wins.
+DEFAULT_WANDB_CACHE_DIR = "/tmp/wandb-cache"
+DEFAULT_WANDB_DATA_DIR = "/tmp/wandb-data"
 
 
 class TrainingMonitor:
@@ -41,6 +52,13 @@ class TrainingMonitor:
         self.run = None
         self._wandb = None
         if enabled:
+            # Keep wandb's artifact cache/staging off the RAM-backed container
+            # overlay (~/.cache/wandb) — set before importing wandb so it picks
+            # these up. setdefault keeps any explicit env override authoritative.
+            os.environ.setdefault("WANDB_CACHE_DIR", DEFAULT_WANDB_CACHE_DIR)
+            os.environ.setdefault("WANDB_DATA_DIR", DEFAULT_WANDB_DATA_DIR)
+            for var in ("WANDB_CACHE_DIR", "WANDB_DATA_DIR"):
+                Path(os.environ[var]).mkdir(parents=True, exist_ok=True)
             try:
                 import wandb
 
