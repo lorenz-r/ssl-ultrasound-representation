@@ -7,4 +7,5 @@ CLAUDE.md
 ./claude/*
 wandb/
 checkpoints/
+artifacts/
 .env
