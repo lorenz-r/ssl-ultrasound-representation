@@ -107,6 +107,7 @@ def train(config: dict | None = None) -> dict:
     log_every = config.get("log_every", 10)  # progress-bar sync cadence (steps)
     mask_ratio = config.get("mask_ratio", 0.0)  # 0.0 = plain autoencoder
     loss_on = config.get("loss_on", "all")  # "all" keeps every patch supervised
+    loss_type = config.get("loss_type", "mse")  # "mse" or "iq" (IQ-aware)
     save_checkpoints = config.get("save_checkpoints", False)
 
     # Monitoring
@@ -232,6 +233,7 @@ def train(config: dict | None = None) -> dict:
             "grad_clip": grad_clip,
             "mask_ratio": mask_ratio,
             "loss_on": loss_on,
+            "loss_type": loss_type,
             "depth_window": depth_window,
             "transducer_window": transducer_window,
             "embed_dim": embed_dim,
@@ -283,6 +285,16 @@ def train(config: dict | None = None) -> dict:
     # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
+    # Loss configuration shared by the train/val passes. spatial_shape lets the
+    # "iq" loss build its optional spectral (envelope-FFT) term per patch.
+    loss_kwargs = dict(
+        loss_on=loss_on,
+        loss_type=loss_type,
+        spatial_shape=(transducer_window, depth_window),
+        env_weight=config.get("env_weight", 1.0),
+        phase_weight=config.get("phase_weight", 1.0),
+        spectral_weight=config.get("spectral_weight", 0.0),
+    )
     best_val_loss = float("inf")
 
     for epoch in range(1, epochs + 1):
@@ -301,7 +313,7 @@ def train(config: dict | None = None) -> dict:
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device_type, enabled=use_amp):
                 pred, target, mask = model(x, pos_embed)
-                loss = calculate_loss(pred, target, mask, loss_on=loss_on)
+                loss = calculate_loss(pred, target, mask, **loss_kwargs)
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)  # unscale so grad clipping sees true norms
@@ -331,7 +343,7 @@ def train(config: dict | None = None) -> dict:
                 x = batch.to(device, non_blocking=True)
                 with torch.autocast(device_type=device_type, enabled=use_amp):
                     pred, target, mask = model(x, pos_embed)
-                    loss = calculate_loss(pred, target, mask, loss_on=loss_on)
+                    loss = calculate_loss(pred, target, mask, **loss_kwargs)
                 val_loss += loss.detach()
                 val_batches += 1
 
@@ -406,6 +418,15 @@ def _cli() -> dict:
     parser.add_argument("--lr", type=float)
     parser.add_argument("--mask-ratio", type=float, dest="mask_ratio")
     parser.add_argument("--loss-on", choices=["all", "masked"], dest="loss_on")
+    parser.add_argument("--loss-type", choices=["mse", "iq"], dest="loss_type",
+                        help="'mse' (squared complex error) or 'iq' (IQ-aware: "
+                             "log-envelope + amplitude-weighted phase coherence).")
+    parser.add_argument("--env-weight", type=float, dest="env_weight",
+                        help="iq loss: weight of the log-envelope term (default 1).")
+    parser.add_argument("--phase-weight", type=float, dest="phase_weight",
+                        help="iq loss: weight of the phase-coherence term (default 1).")
+    parser.add_argument("--spectral-weight", type=float, dest="spectral_weight",
+                        help="iq loss: weight of the envelope-FFT term (default 0=off).")
     parser.add_argument("--depth-window", type=int, dest="depth_window")
     parser.add_argument("--transducer-window", type=int, dest="transducer_window")
     parser.add_argument("--embed-dim", type=int, dest="embed_dim")
