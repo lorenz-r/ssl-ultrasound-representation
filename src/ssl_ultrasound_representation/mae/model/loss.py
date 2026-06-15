@@ -12,7 +12,7 @@ def _iq_per_patch(
     target,
     spatial_shape=None,
     env_weight=1.0,
-    phase_weight=1.0,
+    phase_weight=0.1,
     spectral_weight=0.0,
     eps=1e-6,
 ):
@@ -44,13 +44,19 @@ def _iq_per_patch(
     env_p = torch.sqrt(Ip * Ip + Qp * Qp + eps)
     env_t = torch.sqrt(It * It + Qt * Qt + eps)
 
-    # log-envelope MSE
-    env_loss = (torch.log(env_p) - torch.log(env_t)).pow(2).mean(dim=-1)  # (B, L)
+    # Amplitude weight (target envelope): focuses both terms on the bright
+    # structure that actually carries the anatomy, and starves the unpredictable
+    # low-amplitude nulls that otherwise dominate a raw log-MSE and let the model
+    # drop the envelope in favour of a generic, tiled speckle texture.
+    w = env_t
+    norm = w.sum(dim=-1) + eps
+
+    # amplitude-weighted log-envelope (the anatomy/B-mode term)
+    env_loss = (w * (torch.log(env_p) - torch.log(env_t)).pow(2)).sum(dim=-1) / norm
 
     # amplitude-weighted phase coherence (cos clamped for numerical safety)
     cos = ((Ip * It + Qp * Qt) / (env_p * env_t)).clamp(-1.0, 1.0)
-    w = env_t
-    phase_loss = (w * (1.0 - cos)).sum(dim=-1) / (w.sum(dim=-1) + eps)  # (B, L)
+    phase_loss = (w * (1.0 - cos)).sum(dim=-1) / norm  # (B, L)
 
     per_patch = env_weight * env_loss + phase_weight * phase_loss
 
@@ -76,7 +82,7 @@ def calculate_loss(
     loss_type="mse",
     spatial_shape=None,
     env_weight=1.0,
-    phase_weight=1.0,
+    phase_weight=0.1,
     spectral_weight=0.0,
 ):
     """

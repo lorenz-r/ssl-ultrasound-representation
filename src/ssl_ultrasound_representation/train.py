@@ -292,7 +292,7 @@ def train(config: dict | None = None) -> dict:
         loss_type=loss_type,
         spatial_shape=(transducer_window, depth_window),
         env_weight=config.get("env_weight", 1.0),
-        phase_weight=config.get("phase_weight", 1.0),
+        phase_weight=config.get("phase_weight", 0.1),
         spectral_weight=config.get("spectral_weight", 0.0),
     )
     best_val_loss = float("inf")
