@@ -107,7 +107,6 @@ def train(config: dict | None = None) -> dict:
     log_every = config.get("log_every", 10)  # progress-bar sync cadence (steps)
     mask_ratio = config.get("mask_ratio", 0.0)  # 0.0 = plain autoencoder
     loss_on = config.get("loss_on", "all")  # "all" keeps every patch supervised
-    loss_type = config.get("loss_type", "mse")  # "mse" or "iq" (IQ-aware)
     save_checkpoints = config.get("save_checkpoints", False)
 
     # Monitoring
@@ -160,11 +159,6 @@ def train(config: dict | None = None) -> dict:
         "decoder_heads": config.get("decoder_heads", 8),
         "dim_feedforward": config.get("dim_feedforward", 1024),
         "mask_ratio": mask_ratio,
-        # Positional encoding only in the decoder (encoder learns content-only
-        # embeddings) when False — see --no-pos-in-encoder.
-        "pos_in_encoder": config.get("pos_in_encoder", True),
-        # "resizeconv" (interpolate+conv, no checkerboard) or legacy "deconv".
-        "decoder_head": config.get("decoder_head", "resizeconv"),
     }
     model = SignalMAE(**model_config).to(device)
 
@@ -235,7 +229,6 @@ def train(config: dict | None = None) -> dict:
             "grad_clip": grad_clip,
             "mask_ratio": mask_ratio,
             "loss_on": loss_on,
-            "loss_type": loss_type,
             "depth_window": depth_window,
             "transducer_window": transducer_window,
             "embed_dim": embed_dim,
@@ -287,16 +280,8 @@ def train(config: dict | None = None) -> dict:
     # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
-    # Loss configuration shared by the train/val passes. spatial_shape lets the
-    # "iq" loss build its optional spectral (envelope-FFT) term per patch.
-    loss_kwargs = dict(
-        loss_on=loss_on,
-        loss_type=loss_type,
-        spatial_shape=(transducer_window, depth_window),
-        env_weight=config.get("env_weight", 1.0),
-        phase_weight=config.get("phase_weight", 0.1),
-        spectral_weight=config.get("spectral_weight", 0.0),
-    )
+    # Loss configuration shared by the train/val passes.
+    loss_kwargs = dict(loss_on=loss_on)
     best_val_loss = float("inf")
 
     for epoch in range(1, epochs + 1):
@@ -418,22 +403,7 @@ def _cli() -> dict:
     parser.add_argument("--batch-size", type=int, dest="batch_size")
     parser.add_argument("--lr", type=float)
     parser.add_argument("--mask-ratio", type=float, dest="mask_ratio")
-    parser.add_argument("--decoder-head",
-                        choices=["resizeconv", "pixelshuffle", "deconv"],
-                        dest="decoder_head",
-                        help="'resizeconv' (interpolate+conv, smooth), "
-                             "'pixelshuffle' (sub-pixel conv, sharp + no "
-                             "checkerboard), or legacy 'deconv' (transpose conv).")
     parser.add_argument("--loss-on", choices=["all", "masked"], dest="loss_on")
-    parser.add_argument("--loss-type", choices=["mse", "iq"], dest="loss_type",
-                        help="'mse' (squared complex error) or 'iq' (IQ-aware: "
-                             "log-envelope + amplitude-weighted phase coherence).")
-    parser.add_argument("--env-weight", type=float, dest="env_weight",
-                        help="iq loss: weight of the log-envelope term (default 1).")
-    parser.add_argument("--phase-weight", type=float, dest="phase_weight",
-                        help="iq loss: weight of the phase-coherence term (default 1).")
-    parser.add_argument("--spectral-weight", type=float, dest="spectral_weight",
-                        help="iq loss: weight of the envelope-FFT term (default 0=off).")
     parser.add_argument("--depth-window", type=int, dest="depth_window")
     parser.add_argument("--transducer-window", type=int, dest="transducer_window")
     parser.add_argument("--embed-dim", type=int, dest="embed_dim")
@@ -491,12 +461,6 @@ def _cli() -> dict:
     parser.add_argument(
         "--save-checkpoints", action="store_true", dest="save_checkpoints"
     )
-    parser.add_argument(
-        "--no-pos-in-encoder",
-        action="store_true",
-        help="Add positional encoding only in the decoder, forcing the encoder "
-        "to learn content-only embeddings (reduces position-dominated latents).",
-    )
     args = vars(parser.parse_args())
 
     config = {k: v for k, v in args.items() if v not in (None, False)}
@@ -506,8 +470,6 @@ def _cli() -> dict:
         config["preload"] = False
     if config.pop("no_amp", None):
         config["amp"] = False
-    if config.pop("no_pos_in_encoder", None):
-        config["pos_in_encoder"] = False
     return config
 
 

@@ -139,16 +139,6 @@ def infer_model_config(ckpt: dict) -> dict:
         "decoder_heads": cfg.get("decoder_heads", 8),
         "dim_feedforward": sd["encoder.layers.0.linear1.weight"].shape[0],
         "mask_ratio": cfg.get("mask_ratio", 0.0),
-        # Doesn't change tensor shapes; older runs all used the default (True).
-        "pos_in_encoder": cfg.get("pos_in_encoder", True),
-        # Detect the reconstruction head from the weights it left behind:
-        # resize-conv -> deconv_convs.*, pixel-shuffle -> ps_convs.*, legacy
-        # transpose head -> patch_deconv.*.
-        "decoder_head": (
-            "pixelshuffle" if any(k.startswith("ps_convs") for k in sd)
-            else "resizeconv" if any(k.startswith("deconv_convs") for k in sd)
-            else "deconv"
-        ),
     }
 
 
