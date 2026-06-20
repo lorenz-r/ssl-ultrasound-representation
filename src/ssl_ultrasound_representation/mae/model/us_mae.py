@@ -19,20 +19,22 @@ class SignalMAE(nn.Module):
     of a flat linear layer to keep parameters reasonable.
     """
 
-    def __init__(self,
-                 n_transducers=192,
-                 transducer_window=64,
-                 n_scanlines=192,
-                 n_samples=215,
-                 depth_window=43,
-                 embed_dim=128,
-                 encoder_depth=4,
-                 encoder_heads=8,
-                 decoder_embed_dim=64,
-                 decoder_depth=2,
-                 decoder_heads=4,
-                 dim_feedforward=512,
-                 mask_ratio=0.0):
+    def __init__(
+        self,
+        n_transducers=192,
+        transducer_window=64,
+        n_scanlines=192,
+        n_samples=215,
+        depth_window=43,
+        embed_dim=256,
+        encoder_depth=4,
+        encoder_heads=8,
+        decoder_embed_dim=64,
+        decoder_depth=2,
+        decoder_heads=4,
+        dim_feedforward=512,
+        mask_ratio=0.0,
+    ):
         super().__init__()
         assert n_samples % depth_window == 0, (
             f"n_samples ({n_samples}) must be divisible by depth_window ({depth_window})"
@@ -49,9 +51,7 @@ class SignalMAE(nn.Module):
         self.n_samples = n_samples
         self.depth_window = depth_window
         self.n_depth_windows = n_samples // depth_window
-        self.num_tokens = (
-            n_scanlines * self.n_transducer_groups * self.n_depth_windows
-        )
+        self.num_tokens = n_scanlines * self.n_transducer_groups * self.n_depth_windows
         self.patch_dim = 2 * transducer_window * depth_window
 
         self.embed_dim = embed_dim
@@ -179,7 +179,8 @@ class SignalMAE(nn.Module):
             mask_tokens = self.mask_token.expand(B, L - len_keep, -1)
             y = torch.cat([y, mask_tokens], dim=1)
             y = torch.gather(
-                y, 1,
+                y,
+                1,
                 ids_restore.unsqueeze(-1).expand(-1, -1, self.decoder_embed_dim),
             )
         y = y + self.decoder_pos_embed
