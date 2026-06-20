@@ -389,6 +389,7 @@ def train(config: dict | None = None) -> dict:
                         "train_loss": avg_train_loss,
                         "model_config": model_config,
                     },
+                    keep_last=1,
                 )
 
     monitor.finish(summary={"best_val_loss": best_val_loss})

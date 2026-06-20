@@ -166,6 +166,7 @@ class TrainingMonitor:
         name: str | None = None,
         aliases: list[str] | None = None,
         metadata: dict | None = None,
+        keep_last: int | None = None,
     ) -> None:
         """Upload a checkpoint file as a versioned wandb model artifact.
 
@@ -175,6 +176,11 @@ class TrainingMonitor:
         logged version is always reachable as "<name>:latest". `metadata` is
         stored on the artifact for provenance (epoch, losses, model config) so
         the eval suite can rebuild the model without the training config on hand.
+
+        `keep_last` prunes the artifact collection after the upload commits,
+        deleting all but the `keep_last` newest versions. Each checkpoint is the
+        full model+optimizer state, so without pruning a long run accumulates one
+        copy per val improvement. `None` (default) keeps every version.
         """
         if self.run is None:
             return
@@ -186,7 +192,41 @@ class TrainingMonitor:
             name=name, type="model", metadata=metadata or {}
         )
         artifact.add_file(str(path))
-        self.run.log_artifact(artifact, aliases=aliases or ["latest"])
+        logged = self.run.log_artifact(artifact, aliases=aliases or ["latest"])
+        if keep_last is not None:
+            # Must wait for the server to commit this version before we can list
+            # and prune; otherwise the just-logged "best" could be missed or the
+            # collection enumerated stale.
+            logged.wait()
+            self._prune_checkpoints(name, keep_last)
+
+    def _prune_checkpoints(self, name: str, keep_last: int) -> None:
+        """Delete all but the `keep_last` newest versions of the `name` model
+        artifact. Degrades to a warning if the public API is unavailable so a
+        pruning hiccup never aborts training."""
+        try:
+            api = self._wandb.Api()
+            collection = f"{self.run.entity}/{self.run.project}/{name}"
+            versions = list(api.artifacts(type_name="model", name=collection))
+        except Exception as exc:  # noqa: BLE001 — never fail training on cleanup
+            warnings.warn(f"checkpoint pruning skipped ({exc})")
+            return
+
+        def _version_num(art) -> int:
+            try:
+                return int(str(art.version).lstrip("v"))
+            except (ValueError, AttributeError):
+                return -1
+
+        versions.sort(key=_version_num, reverse=True)  # newest first
+        for art in versions[keep_last:]:
+            try:
+                # delete_aliases drops the per-epoch alias each version carries;
+                # "best"/"latest" live on the newest (kept) version, so they move
+                # with the collection rather than getting deleted here.
+                art.delete(delete_aliases=True)
+            except Exception as exc:  # noqa: BLE001
+                warnings.warn(f"could not delete artifact {art.version} ({exc})")
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def finish(self, summary: dict | None = None) -> None:
