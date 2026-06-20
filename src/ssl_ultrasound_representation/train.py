@@ -168,10 +168,13 @@ def train(config: dict | None = None) -> dict:
     ).to(device)
 
     # ------------------------------------------------------------------
-    # Data — file-level split (subject split is degenerate with 2 subjects),
-    # no test set for now. Focal zone 0 is sliced at the zarr level and frames
-    # are preloaded into shared RAM (see UltrasoundMAEDataset); the transform
-    # only standardizes each frame.
+    # Data — subject-level split: no subject (and therefore none of its highly
+    # correlated same-session files / 2-frame cines) appears in two splits, so
+    # val measures generalisation to an unseen subject rather than to a new clip
+    # of a subject already in train. With few subjects this can leave val small
+    # or empty; tune `split_ratios` or pass explicit train/val/test_subjects.
+    # Focal zone 0 is sliced at the zarr level and frames are preloaded into
+    # shared RAM (see UltrasoundMAEDataset); the transform only standardizes.
     # ------------------------------------------------------------------
     data_source = (
         {
@@ -185,7 +188,7 @@ def train(config: dict | None = None) -> dict:
     )
     splits, meta = build_split_datasets(
         **data_source,
-        split_strategy="file",
+        split_strategy=config.get("split_strategy", "subject"),
         ratios=config.get("split_ratios", (0.85, 0.15, 0.0)),
         transform=normalize_frame,
         focal_zone=config.get("focal_zone", 0),

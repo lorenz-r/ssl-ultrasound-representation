@@ -339,7 +339,7 @@ def run(config: dict) -> list[str]:
     )
     datasets, meta = build_split_datasets(
         **data_source,
-        split_strategy="file",
+        split_strategy=config.get("split_strategy", "subject"),
         ratios=config.get("split_ratios", (0.85, 0.15, 0.0)),
         transform=normalize_frame,
         focal_zone=config.get("focal_zone", 0),
