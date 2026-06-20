@@ -158,3 +158,19 @@ poetry run python scripts/dataset_scripts/push_to_hf.py \
 Pass `--dry-run` first to validate inputs and preview the generated README without any network writes.
 
 ---
+
+## 📊 Enabling Weights & Biases (W&B) Logging
+
+To track your experiments on the cluster, you need to authenticate your personal Weights & Biases account. For security and compatibility with our shared containers, each user must set up a local environment file.
+
+### Setup Instructions (Do this once)
+
+**1. Get your API key:**
+Log in to your W&B account and grab your personal API key from [wandb.ai/authorize](https://wandb.ai/authorize).
+
+**2. Create your credentials file:**
+Log into the cluster and run the following command to create a hidden `.wandb_env` file in your home directory. Be sure to replace `<your-personal-key-here>` with your actual key:
+
+```bash
+echo "WANDB_API_KEY=<your-personal-key-here>" > ~/.wandb_env
+```
