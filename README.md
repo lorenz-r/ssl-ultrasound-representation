@@ -173,3 +173,4 @@ Log into the cluster and run the following command to create a hidden `.wandb_en
 
 ```bash
 echo "WANDB_API_KEY=<your-personal-key-here>" > ~/.wandb_env
+```

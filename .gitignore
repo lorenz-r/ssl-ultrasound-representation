@@ -4,3 +4,8 @@ scripts/matlab_scripts
 __pycache__/
 *.pyc
 CLAUDE.md
+./claude/*
+wandb/
+checkpoints/
+artifacts/
+.env
