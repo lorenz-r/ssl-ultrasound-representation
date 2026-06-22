@@ -54,6 +54,68 @@ class PerDepthRMSNorm:
         return norm * self.scale(raw)
 
 
+class FixedDepthRMSNorm:
+    """Divide every frame by a FIXED dataset-wide depth-wise RMS curve `r(z)` — a
+    global time-gain-compensation curve estimated once over the train split and
+    frozen `(scripts/dataset_scripts/fit_depth_rms.py)`.
+
+    Same statistic as `PerDepthRMSNorm` but pooled over the dataset instead of
+    per frame, which changes its character:
+
+      * Because `r(z)` is an RMS, `E[(x/r)^2 | z] = 1` at every depth, so this
+        single divide both flattens the systematic depth decay AND standardizes
+        the whole tensor to ~unit global variance (IQ stays zero-mean) — no
+        separate scale needed.
+      * Being frame-independent, it removes only the *systematic* trend: each
+        frame keeps its per-depth residual (anatomy + attenuation physics + the
+        honest deep-field SNR rolloff) and its amplitude relative to other
+        frames, and it never whitens a single frame's deep noise to unit variance
+        or couples to a lone bright reflector the way the per-frame version does.
+      * The divisor is a fixed vector, so the transform is trivially invertible
+        to a fixed physical reference — the monitor's physical row stays
+        comparable across runs and normalization schemes.
+
+    `curve` is `r(z)`, shape `(n_samples,)`. Load a cached fit with `from_file`.
+    """
+
+    def __init__(self, curve: torch.Tensor, eps: float = 1e-8):
+        self.curve = torch.as_tensor(curve, dtype=torch.float32).flatten()
+        self.eps = eps
+
+    def scale(self, raw: torch.Tensor) -> torch.Tensor:
+        """Fixed per-depth divisor broadcast over `(transducer, scanline, iq, sample)`."""
+        return self.curve.to(raw.dtype).view(1, 1, 1, -1) + self.eps
+
+    def __call__(self, raw: torch.Tensor) -> torch.Tensor:
+        return raw / self.scale(raw)
+
+    def denormalize(self, norm: torch.Tensor, raw: torch.Tensor) -> torch.Tensor:
+        """Map a normalized tensor back to physical IQ units. The divisor is
+        fixed, so `raw` is unused (kept for interface parity with the per-frame
+        normalizers the monitor calls)."""
+        return norm * self.scale(raw)
+
+    @classmethod
+    def from_dataset(cls, train_ds, eps: float = 1e-8) -> "FixedDepthRMSNorm":
+        """Compute the curve `r(z)` inline from the train split (no caching).
+
+        Pooled quadratic-mean RMS over every (frame, transducer, scanline, iq),
+        streamed one frame at a time via `train_ds.raw(i)` (transform bypassed),
+        accumulated in float64 for a stable curve. Fitting on the train split
+        only keeps the normalization leakage-safe.
+        """
+        sumsq: torch.Tensor | None = None
+        count = 0
+        for i in range(len(train_ds)):
+            frame = train_ds.raw(i).to(torch.float64)  # (T, Sc, iq, sample)
+            sq = frame.pow(2).sum(dim=(0, 1, 2))  # (sample,)
+            sumsq = sq if sumsq is None else sumsq + sq
+            count += frame.shape[0] * frame.shape[1] * frame.shape[2]
+        if sumsq is None or count == 0:
+            raise RuntimeError("train split is empty — cannot fit depth-RMS curve.")
+        return cls((sumsq / count).sqrt(), eps=eps)
+
+
 # Default normalization used both as the dataset transform and by the monitor
 # (the same instance, so the monitor inverts exactly what training applied).
 normalize_frame = PerDepthRMSNorm()
@@ -211,11 +273,13 @@ def train(config: dict | None = None) -> dict:
         if hf_repo
         else {"local_zip": data_zip, "local_metadata": data_metadata}
     )
+    # Build transform-free so the train split can be read raw to fit the fixed
+    # normalizer below; the chosen transform is attached to every split after.
     splits, meta = build_split_datasets(
         **data_source,
         split_strategy=config.get("split_strategy", "subject"),
         ratios=config.get("split_ratios", (0.85, 0.15, 0.0)),
-        transform=normalize_frame,
+        transform=None,
         focal_zone=config.get("focal_zone", 0),
         preload=preload,
         # Shared memory is only needed when workers fork; it routes through
@@ -223,6 +287,25 @@ def train(config: dict | None = None) -> dict:
         # preload path to keep peak memory low.
         share_memory=preload and num_workers > 0,
     )
+
+    # Normalization. "per_frame" whitens each frame's per-depth RMS; the default
+    # "fixed_depth_rms" instead divides by ONE global depth-wise RMS curve fit
+    # over the train split here, pre-training — a frozen global TGC that flattens
+    # the systematic decay and standardizes the whole tensor to ~unit variance
+    # without whitening per-frame noise. Both share the (normalize, denormalize)
+    # interface the monitor inverts.
+    normalizer_kind = config.get("normalizer", "fixed_depth_rms")
+    if normalizer_kind == "per_frame":
+        normalizer = normalize_frame
+    elif normalizer_kind == "fixed_depth_rms":
+        normalizer = FixedDepthRMSNorm.from_dataset(splits["train"])
+        dr = 20 * torch.log10(normalizer.curve.max() / normalizer.curve.clamp_min(1e-12).min())
+        print(f"Fixed depth-RMS curve fit over {len(splits['train'])} train frames "
+              f"(dynamic range {dr:.1f} dB)")
+    else:
+        raise ValueError(f"unknown normalizer: {normalizer_kind!r}")
+    for ds in splits.values():
+        ds.transform = normalizer
 
     # Persistent workers avoid respawning (and re-reading the first frame) at
     # every epoch boundary; pointless when num_workers == 0.
@@ -284,7 +367,7 @@ def train(config: dict | None = None) -> dict:
     monitor.set_vis_frames(
         torch.stack([vis_source.raw(i) for i in vis_idx]),
         [f"val[{i}]" if len(splits["val"]) else f"train[{i}]" for i in vis_idx],
-        normalize_frame,
+        normalizer,
     )
 
     # ------------------------------------------------------------------
