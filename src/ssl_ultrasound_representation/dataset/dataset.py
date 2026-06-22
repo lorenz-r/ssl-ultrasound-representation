@@ -406,11 +406,20 @@ class UltrasoundMAEDataset:
     def __len__(self) -> int:
         return len(self.indices)
 
-    def __getitem__(self, i: int):
+    def raw(self, i: int):
+        """The untransformed frame at split position `i` (cache-aware).
+
+        `__getitem__` always applies `self.transform`; this returns the frame
+        before it, so callers that need the physical IQ units — e.g. the training
+        monitor anchoring its ground truth to the un-normalized B-mode — can get
+        them without disabling the transform or re-reading the zarr by hand.
+        """
         if self._cache is not None:
-            tensor = self._cache[i]
-        else:
-            tensor = self._read_frame(self.indices[i])
+            return self._cache[i]
+        return self._read_frame(self.indices[i])
+
+    def __getitem__(self, i: int):
+        tensor = self.raw(i)
         if self.transform is not None:
             tensor = self.transform(tensor)
         return tensor

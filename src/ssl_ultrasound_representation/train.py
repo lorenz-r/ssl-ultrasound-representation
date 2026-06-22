@@ -19,7 +19,7 @@ from ssl_ultrasound_representation.dataset import build_split_datasets
 from ssl_ultrasound_representation.utils.monitoring import TrainingMonitor
 
 
-def normalize_frame(t: torch.Tensor) -> torch.Tensor:
+class PerDepthRMSNorm:
     """Per-depth RMS normalization of one frame `(transducer, scanline, iq, sample)`.
 
     Raw IQ decays ~2 orders of magnitude from shallow to deep, so a single
@@ -29,9 +29,34 @@ def normalize_frame(t: torch.Tensor) -> torch.Tensor:
     iq) — one positive scalar per depth, applied to I and Q alike, so the
     across-aperture phase is preserved exactly while every depth contributes
     equally to the loss.
+
+    The scale is a deterministic function of the raw frame, so the transform is
+    invertible: `denormalize` multiplies the same per-depth RMS back in. This is
+    what lets the training monitor recover the physical B-mode from a normalized
+    reconstruction, keeping its ground-truth anchor invariant to whichever
+    normalization scheme is in use (swap this class out and the monitor follows).
     """
-    rms = t.pow(2).mean(dim=(0, 1, 2), keepdim=True).sqrt()  # (1, 1, 1, sample)
-    return t / (rms + 1e-8)
+
+    def __init__(self, eps: float = 1e-8):
+        self.eps = eps
+
+    def scale(self, raw: torch.Tensor) -> torch.Tensor:
+        """Per-depth RMS `(1, 1, 1, sample)` — the divisor applied at each depth."""
+        rms = raw.pow(2).mean(dim=(0, 1, 2), keepdim=True).sqrt()
+        return rms + self.eps
+
+    def __call__(self, raw: torch.Tensor) -> torch.Tensor:
+        return raw / self.scale(raw)
+
+    def denormalize(self, norm: torch.Tensor, raw: torch.Tensor) -> torch.Tensor:
+        """Map a normalized tensor back to physical IQ units, using the per-depth
+        scale of `raw` (the frame the reconstruction was produced from)."""
+        return norm * self.scale(raw)
+
+
+# Default normalization used both as the dataset transform and by the monitor
+# (the same instance, so the monitor inverts exactly what training applied).
+normalize_frame = PerDepthRMSNorm()
 
 
 # Focal-zone selection happens at the zarr level (focal_zone=0 in
@@ -254,9 +279,12 @@ def train(config: dict | None = None) -> dict:
     # Fixed snapshot frames from the val split (fall back to train if empty)
     vis_source = splits["val"] if len(splits["val"]) > 0 else splits["train"]
     vis_idx = sorted({0, len(vis_source) // 2})[:n_vis_frames]
+    # Anchor the monitor on the RAW (un-normalized) frames + the normalizer, so
+    # its physical-space ground truth stays fixed when the normalization changes.
     monitor.set_vis_frames(
-        torch.stack([vis_source[i] for i in vis_idx]),
+        torch.stack([vis_source.raw(i) for i in vis_idx]),
         [f"val[{i}]" if len(splits["val"]) else f"train[{i}]" for i in vis_idx],
+        normalize_frame,
     )
 
     # ------------------------------------------------------------------

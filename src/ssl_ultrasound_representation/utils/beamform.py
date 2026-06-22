@@ -107,25 +107,45 @@ class ZoneBeamformer:
         np.divide(img, wts, out=img, where=wts > 0)
         return img
 
+    def bmode(
+        self,
+        frame: np.ndarray,
+        *,
+        gain: np.ndarray | None = None,
+        ref: float | None = None,
+        db_range: float = 50.0,
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+        """
+        Beamform one frame into a log-compressed B-mode image (nz, nx) in
+        [-db_range, 0].
+
+        `gain` (a TGC curve) and `ref` (the 0 dB envelope level) default to being
+        computed from this frame; pass the values returned for an *anchor* frame
+        to put another frame (e.g. a reconstruction) on exactly that scale, so
+        amplitude errors stay visible instead of being normalised away.
+
+        Returns `(db_image, gain, ref)` — feed `gain`/`ref` back in for the paired
+        frame, or cache them for a fixed anchor across epochs.
+        """
+        env = np.abs(self.beamform(frame))
+        if gain is None:
+            _, gain = pymust.tgc(env)
+        env = np.maximum(env * gain, 1e-9)
+        if ref is None:
+            ref = float(env.max())
+        db = np.clip(20.0 * np.log10(env / ref), -db_range, 0)
+        return db, gain, ref
+
     def bmode_pair(
         self, gt_frame: np.ndarray, recon_frame: np.ndarray, db_range: float = 50.0
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Beamform a ground-truth / reconstruction pair into comparable B-mode
-        images: the TGC gain and the 0 dB reference are computed from the
-        ground truth and applied to both, so amplitude errors in the
-        reconstruction stay visible instead of being normalised away.
+        images: the TGC gain and the 0 dB reference are computed from the ground
+        truth and applied to both. Thin wrapper over `bmode`.
 
         Returns (gt_db, recon_db), each (nz, nx) in [-db_range, 0].
         """
-        env_gt = np.abs(self.beamform(gt_frame))
-        env_rec = np.abs(self.beamform(recon_frame))
-
-        _, C = pymust.tgc(env_gt)
-        env_gt = np.maximum(env_gt * C, 1e-9)
-        env_rec = np.maximum(env_rec * C, 1e-9)
-
-        ref = env_gt.max()
-        gt_db = np.clip(20.0 * np.log10(env_gt / ref), -db_range, 0)
-        rec_db = np.clip(20.0 * np.log10(env_rec / ref), -db_range, 0)
+        gt_db, gain, ref = self.bmode(gt_frame, db_range=db_range)
+        rec_db, _, _ = self.bmode(recon_frame, gain=gain, ref=ref, db_range=db_range)
         return gt_db, rec_db

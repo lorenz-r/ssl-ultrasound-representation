@@ -79,10 +79,14 @@ class TrainingMonitor:
                 "Generate it with scripts/dataset_scripts/export_beamform_params.py."
             )
 
-        # Fixed vis frames (set via set_vis_frames); GT B-mode cached lazily.
-        self._vis_frames: torch.Tensor | None = None
+        # Fixed vis frames (set via set_vis_frames): RAW (un-normalized) IQ plus
+        # the normalizer, so the monitor can show both the normalized space the
+        # model trains in and the physical space its raw-B-mode anchor lives in.
+        # The fixed anchors (and their TGC/0 dB scale) are cached lazily.
+        self._raw_frames: torch.Tensor | None = None
+        self._normalizer = None
         self._vis_labels: list[str] = []
-        self._gt_db: list[np.ndarray] | None = None
+        self._anchors: list[dict] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -94,43 +98,75 @@ class TrainingMonitor:
             self.run.log({"epoch": epoch, **metrics}, step=epoch)
 
     # ── reconstruction snapshots ─────────────────────────────────────────────
-    def set_vis_frames(self, frames: torch.Tensor, labels: list[str]) -> None:
+    def set_vis_frames(self, raw_frames: torch.Tensor, labels: list[str], normalizer) -> None:
         """Fix the frames used for every snapshot so epochs stay comparable.
 
         Args:
-            frames: (N, transducer, scanline, 2, sample) — already preprocessed
-                exactly like training inputs (focal zone selected, normalized).
+            raw_frames: (N, transducer, scanline, 2, sample) — RAW IQ (focal zone
+                selected, *not* normalized). The monitor applies `normalizer`
+                itself, so its physical-space anchor is the un-normalized B-mode
+                and stays fixed if the normalization scheme changes.
             labels: one short identifier per frame (e.g. "val[0]").
+            normalizer: the training transform; a callable `normalizer(raw)` with
+                a `normalizer.denormalize(norm, raw)` inverse (see
+                `train.PerDepthRMSNorm`).
         """
-        self._vis_frames = frames
+        self._raw_frames = raw_frames
         self._vis_labels = labels
+        self._normalizer = normalizer
+        self._anchors = None  # rebuilt lazily against the new frames/normalizer
 
     def log_reconstructions(
         self, epoch: int, model: torch.nn.Module, pos_embed: torch.Tensor, device
     ) -> None:
-        if self.run is None or self._beamformer is None or self._vis_frames is None:
+        if self.run is None or self._beamformer is None or self._raw_frames is None:
             return
+
+        bf = self._beamformer
+        raw = self._raw_frames
+        norm = self._normalizer
+        # Normalize per frame (stats are per-frame, like the dataset transform).
+        norm_in = torch.stack([norm(f) for f in raw])
 
         model.eval()
         with torch.no_grad():
-            x = self._vis_frames.to(device)
-            pred, _, _ = model(x, pos_embed)
-            recon = model.unpatchify(pred).cpu().numpy()
-        gt = self._vis_frames.numpy()
+            pred, _, _ = model(norm_in.to(device), pos_embed)
+            norm_recon = model.unpatchify(pred).cpu()
+
+        # Fixed anchors (normalized input + raw input B-modes, with their TGC/0 dB
+        # scale) never change across epochs — beamform them once and reuse.
+        if self._anchors is None:
+            self._anchors = []
+            for i in range(len(raw)):
+                n_db, n_gain, n_ref = bf.bmode(norm_in[i].numpy())
+                p_db, p_gain, p_ref = bf.bmode(raw[i].numpy())
+                self._anchors.append(
+                    {"norm": (n_db, n_gain, n_ref), "phys": (p_db, p_gain, p_ref)}
+                )
 
         images = []
         for i, label in enumerate(self._vis_labels):
-            gt_db, rec_db = self._beamformer.bmode_pair(gt[i], recon[i])
-            images.append(
-                self._wandb.Image(
-                    self._comparison_figure(gt_db, rec_db, f"{label} — epoch {epoch}"),
-                    caption=label,
-                )
+            denorm_recon = norm.denormalize(norm_recon[i], raw[i]).numpy()
+            n_db, n_gain, n_ref = self._anchors[i]["norm"]
+            p_db, p_gain, p_ref = self._anchors[i]["phys"]
+            # Reconstructions on each row share their anchor's TGC/0 dB scale.
+            n_rec_db, _, _ = bf.bmode(norm_recon[i].numpy(), gain=n_gain, ref=n_ref)
+            p_rec_db, _, _ = bf.bmode(denorm_recon, gain=p_gain, ref=p_ref)
+            fig = self._comparison_figure(
+                rows=[
+                    ("normalized", n_db, n_rec_db),
+                    ("physical", p_db, p_rec_db),
+                ],
+                title=f"{label} — epoch {epoch}",
             )
+            images.append(self._wandb.Image(fig, caption=label))
             plt.close("all")
         self.run.log({"reconstructions": images}, step=epoch)
 
-    def _comparison_figure(self, gt_db, rec_db, title: str):
+    def _comparison_figure(self, rows, title: str):
+        """3×2 grid: one row per space (normalized / physical), columns
+        [input | reconstruction | difference (dB)]. The physical row's input is
+        the raw-B-mode anchor — invariant to the normalization scheme."""
         bf = self._beamformer
         extent = [
             bf.x_grid[0] * 1e3,
@@ -138,22 +174,25 @@ class TrainingMonitor:
             bf.z_grid[-1] * 1e3,
             bf.z_grid[0] * 1e3,
         ]
-        fig, axes = plt.subplots(1, 3, figsize=(12, 4.5))
-        for ax, img, name, kw in (
-            (axes[0], gt_db, "ground truth", dict(cmap="gray", vmin=-50, vmax=0)),
-            (axes[1], rec_db, "reconstruction", dict(cmap="gray", vmin=-50, vmax=0)),
-            (
-                axes[2],
-                rec_db - gt_db,
-                "difference (dB)",
-                dict(cmap="coolwarm", vmin=-20, vmax=20),
-            ),
-        ):
-            im = ax.imshow(img, extent=extent, aspect="equal", **kw)
-            ax.set_title(name, fontsize=9)
-            ax.set_xlabel("Lateral (mm)", fontsize=8)
-            fig.colorbar(im, ax=ax, fraction=0.046)
-        axes[0].set_ylabel("Depth (mm)", fontsize=8)
+        fig, axes = plt.subplots(2, 3, figsize=(12, 8.5))
+        for r, (space, in_db, rec_db) in enumerate(rows):
+            panels = (
+                (in_db, f"input ({space})", dict(cmap="gray", vmin=-50, vmax=0)),
+                (rec_db, f"reconstruction ({space})", dict(cmap="gray", vmin=-50, vmax=0)),
+                (
+                    rec_db - in_db,
+                    "difference (dB)",
+                    dict(cmap="coolwarm", vmin=-20, vmax=20),
+                ),
+            )
+            for c, (img, name, kw) in enumerate(panels):
+                ax = axes[r, c]
+                im = ax.imshow(img, extent=extent, aspect="equal", **kw)
+                ax.set_title(name, fontsize=9)
+                if r == len(rows) - 1:
+                    ax.set_xlabel("Lateral (mm)", fontsize=8)
+                fig.colorbar(im, ax=ax, fraction=0.046)
+            axes[r, 0].set_ylabel("Depth (mm)", fontsize=8)
         fig.suptitle(title, fontsize=10)
         fig.tight_layout()
         return fig
