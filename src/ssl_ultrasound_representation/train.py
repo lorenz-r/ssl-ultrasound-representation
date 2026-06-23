@@ -116,6 +116,57 @@ class FixedDepthRMSNorm:
         return cls((sumsq / count).sqrt(), eps=eps)
 
 
+class PolarLogNorm:
+    """Phase-preserving log compression of one frame `(transducer, scanline, iq, sample)`.
+
+    Log compression is the classic ultrasound trick for lifting faint deep
+    structure into view, but it lives on the *envelope* `|I + jQ|` and so throws
+    phase away — and phase is exactly the across-aperture information that makes
+    unbeamformed channel data worth training on. So instead of compressing the
+    envelope we decouple amplitude from phase and compress only the amplitude,
+    then remap it onto the original phase vector (polar log compression):
+
+        A = |I + jQ|,  φ = atan2(Q, I)
+        A_log = log1p(A / eps)
+        I' = A_log·cos φ,  Q' = A_log·sin φ   ( == (A_log / A)·[I, Q] )
+
+    Two things make this safe where the textbook `log10(A + eps)` is not:
+
+      * `log1p(A/eps)` is ≥ 0 everywhere, so the remapped vector never flips
+        sign. Plain `log10(A + eps)` goes negative for `A + eps < 1` (most of the
+        decaying deep field), which is a silent 180° phase rotation — the very
+        corruption the polar split is meant to avoid.
+      * It composes *after* a per-frame per-depth RMS normalization, so the
+        amplitude fed to the log is already ~O(1) across depth. The log then does
+        dynamic-range work (knee set by `eps`) instead of re-encoding the depth
+        decay it would otherwise just pass through.
+
+    Invertible end-to-end, so the monitor recovers the physical B-mode:
+    `A = eps·expm1(A_log)`, remap onto phase, then multiply the per-depth RMS
+    back in. `eps` is a real hyperparameter — the compression knee — not just a
+    divide-by-zero guard; lower it to lift fainter structure.
+    """
+
+    def __init__(self, eps: float = 1e-2, tiny: float = 1e-12):
+        self.eps = eps
+        self.tiny = tiny
+        self._depth = PerDepthRMSNorm()
+
+    def __call__(self, raw: torch.Tensor) -> torch.Tensor:
+        n = raw / self._depth.scale(raw)                 # per-depth RMS IQ, ~O(1)
+        amp = n.pow(2).sum(dim=2, keepdim=True).sqrt()   # envelope (T, Sc, 1, sample)
+        amp_log = torch.log1p(amp / self.eps)
+        return n * (amp_log / amp.clamp_min(self.tiny))  # rescale magnitude, keep phase
+
+    def denormalize(self, norm: torch.Tensor, raw: torch.Tensor) -> torch.Tensor:
+        """Map a compressed tensor back to physical IQ units, using the per-depth
+        RMS of `raw` (the frame the reconstruction was produced from)."""
+        amp_log = norm.pow(2).sum(dim=2, keepdim=True).sqrt()  # == log1p(amp/eps)
+        amp = self.eps * torch.expm1(amp_log)
+        n = norm * (amp / amp_log.clamp_min(self.tiny))        # undo log, keep phase
+        return n * self._depth.scale(raw)
+
+
 # Default normalization used both as the dataset transform and by the monitor
 # (the same instance, so the monitor inverts exactly what training applied).
 normalize_frame = PerDepthRMSNorm()
@@ -292,11 +343,16 @@ def train(config: dict | None = None) -> dict:
     # "fixed_depth_rms" instead divides by ONE global depth-wise RMS curve fit
     # over the train split here, pre-training — a frozen global TGC that flattens
     # the systematic decay and standardizes the whole tensor to ~unit variance
-    # without whitening per-frame noise. Both share the (normalize, denormalize)
-    # interface the monitor inverts.
+    # without whitening per-frame noise. "polar_log" composes per-frame depth-RMS
+    # with phase-preserving log compression of the amplitude (knee = config
+    # "log_eps"). All three share the (normalize, denormalize) interface the
+    # monitor inverts.
     normalizer_kind = config.get("normalizer", "fixed_depth_rms")
     if normalizer_kind == "per_frame":
         normalizer = normalize_frame
+    elif normalizer_kind == "polar_log":
+        normalizer = PolarLogNorm(eps=config.get("log_eps", 1e-2))
+        print(f"Polar log compression (phase-preserving, knee eps={normalizer.eps})")
     elif normalizer_kind == "fixed_depth_rms":
         normalizer = FixedDepthRMSNorm.from_dataset(splits["train"])
         dr = 20 * torch.log10(normalizer.curve.max() / normalizer.curve.clamp_min(1e-12).min())
