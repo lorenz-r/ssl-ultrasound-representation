@@ -519,6 +519,11 @@ def _cli() -> dict:
     parser.add_argument("--lr", type=float)
     parser.add_argument("--mask-ratio", type=float, dest="mask_ratio")
     parser.add_argument("--loss-on", choices=["all", "masked"], dest="loss_on")
+    parser.add_argument(
+        "--normalizer",
+        choices=["fixed_depth_rms", "per_frame"],
+        help="Normalization scheme (default fixed_depth_rms).",
+    )
     parser.add_argument("--depth-window", type=int, dest="depth_window")
     parser.add_argument("--transducer-window", type=int, dest="transducer_window")
     parser.add_argument("--embed-dim", type=int, dest="embed_dim")
