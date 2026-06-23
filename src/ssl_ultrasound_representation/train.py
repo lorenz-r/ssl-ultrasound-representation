@@ -577,8 +577,14 @@ def _cli() -> dict:
     parser.add_argument("--loss-on", choices=["all", "masked"], dest="loss_on")
     parser.add_argument(
         "--normalizer",
-        choices=["fixed_depth_rms", "per_frame"],
+        choices=["fixed_depth_rms", "per_frame", "polar_log"],
         help="Normalization scheme (default fixed_depth_rms).",
+    )
+    parser.add_argument(
+        "--log-eps",
+        type=float,
+        dest="log_eps",
+        help="Polar-log compression knee (only used with --normalizer polar_log; default 1e-2).",
     )
     parser.add_argument("--depth-window", type=int, dest="depth_window")
     parser.add_argument("--transducer-window", type=int, dest="transducer_window")
