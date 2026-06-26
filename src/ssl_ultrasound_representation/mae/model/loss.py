@@ -29,7 +29,7 @@ def _mse_per_patch(pred, target):
     return (pred - target).pow(2).mean(dim=-1)
 
 
-def _envelope_mse_per_patch(pred, target):
+def _envelope_mse_per_patch(pred, target, eps: float = 1e-6):
     """MSE on the instantaneous envelope √(I²+Q²).
 
     Phase-invariant: two patches with identical amplitude but shifted phase
@@ -38,8 +38,8 @@ def _envelope_mse_per_patch(pred, target):
     """
     I_p, Q_p = _split_iq(pred)
     I_t, Q_t = _split_iq(target)
-    env_p = (I_p.pow(2) + Q_p.pow(2)).sqrt()
-    env_t = (I_t.pow(2) + Q_t.pow(2)).sqrt()
+    env_p = (I_p.pow(2) + Q_p.pow(2) + eps).sqrt()
+    env_t = (I_t.pow(2) + Q_t.pow(2) + eps).sqrt()
     return (env_p - env_t).pow(2).mean(dim=-1)
 
 
@@ -75,9 +75,7 @@ def _phase_per_patch(pred, target):
     return (1.0 - cos_diff).mean(dim=-1)
 
 
-def _spectral_per_patch(
-    pred, target, transducer_window: int, depth_window: int
-):
+def _spectral_per_patch(pred, target, transducer_window: int, depth_window: int):
     """MSE on the complex magnitude spectrum along the depth axis.
 
     Treats each patch as an analytic signal (z = I + jQ), FFTs along depth,
@@ -89,14 +87,14 @@ def _spectral_per_patch(
     numerically stable, and this function may be called inside torch.autocast.
     """
     B, L = pred.shape[:2]
-    I_p, Q_p = _split_iq(pred)   # (B, L, tw*w)
+    I_p, Q_p = _split_iq(pred)  # (B, L, tw*w)
     I_t, Q_t = _split_iq(target)
 
     # (B*L, tw, w) analytic signal — float32 for FFT stability
     z_p = (I_p.float() + 1j * Q_p.float()).view(B * L, transducer_window, depth_window)
     z_t = (I_t.float() + 1j * Q_t.float()).view(B * L, transducer_window, depth_window)
 
-    Z_p = torch.fft.fft(z_p, dim=-1)   # (B*L, tw, w)
+    Z_p = torch.fft.fft(z_p, dim=-1)  # (B*L, tw, w)
     Z_t = torch.fft.fft(z_t, dim=-1)
 
     per_token = (Z_p.abs() - Z_t.abs()).pow(2).mean(dim=(-2, -1))

@@ -188,10 +188,12 @@ def train(config: dict | None = None) -> dict:
         if hf_repo
         else {"local_zip": data_zip, "local_metadata": data_metadata}
     )
+    overfit = config.get("overfit", False)
+    split_ratios = config.get("split_ratios", (1.0, 0.0, 0.0) if overfit else (0.85, 0.15, 0.0))
     splits, meta = build_split_datasets(
         **data_source,
         split_strategy=config.get("split_strategy", "subject"),
-        ratios=config.get("split_ratios", (0.85, 0.15, 0.0)),
+        ratios=split_ratios,
         transform=normalize_frame,
         focal_zone=config.get("focal_zone", 0),
         preload=preload,
@@ -200,6 +202,8 @@ def train(config: dict | None = None) -> dict:
         # preload path to keep peak memory low.
         share_memory=preload and num_workers > 0,
     )
+    if overfit:
+        splits["val"] = splits["train"]
 
     # Persistent workers avoid respawning (and re-reading the first frame) at
     # every epoch boundary; pointless when num_workers == 0.
@@ -417,6 +421,21 @@ def _cli() -> dict:
     parser.add_argument("--batch-size", type=int, dest="batch_size")
     parser.add_argument("--lr", type=float)
     parser.add_argument("--mask-ratio", type=float, dest="mask_ratio")
+    parser.add_argument(
+        "--overfit",
+        action="store_true",
+        help="Put all data in train and use it as val too — for single-sample "
+        "overfit sanity checks.",
+    )
+    parser.add_argument(
+        "--split-ratios",
+        type=float,
+        nargs=3,
+        dest="split_ratios",
+        metavar=("TRAIN", "VAL", "TEST"),
+        help="Fraction of data for each split (must sum to 1). "
+        "Example: --split-ratios 0.8 0.2 0.0",
+    )
     parser.add_argument("--loss-on", choices=["all", "masked"], dest="loss_on")
     parser.add_argument(
         "--loss-type",
@@ -496,6 +515,8 @@ def _cli() -> dict:
         config["preload"] = False
     if config.pop("no_amp", None):
         config["amp"] = False
+    if "split_ratios" in config:
+        config["split_ratios"] = tuple(config["split_ratios"])
     return config
 
 
