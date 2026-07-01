@@ -42,8 +42,19 @@ from visualize_beamformed_pymust import load_metadata  # noqa: E402
 DEPTH_CUTOFF = 860           # fast-time samples kept (everything beyond is noise)
 DOWNSAMPLE_FACTOR = 4
 N_SAMPLES_OUT = DEPTH_CUTOFF // DOWNSAMPLE_FACTOR  # 215
-CHUNKS = (1, 32, 32, 1, 2, N_SAMPLES_OUT)
 ARRAY_NAME = "rf_iq"
+
+
+def frame_chunks(n_elem: int, n_sl: int, n_fz: int) -> tuple[int, ...]:
+    """
+    One chunk per frame: the whole (T, SL, FZ, IQ, sample) volume of a frame is a
+    single file. Consumers read a full frame per item (see dataset.py `_read_frame`)
+    and `max_frames` selects frames via the leading chunk index, so sub-frame chunks
+    gain nothing at read time — they only multiply the file count. The old
+    (1, 32, 32, 1, 2, 215) split each frame into 108 files, which blows past
+    HuggingFace's 10k-files-per-directory limit once there are >~92 frames.
+    """
+    return (1, n_elem, n_sl, n_fz, 2, N_SAMPLES_OUT)
 
 
 # ── File discovery / metadata helpers ───────────────────────────────────────────
@@ -218,9 +229,10 @@ def main() -> None:
     if total_frames == 0:
         raise SystemExit("No usable frames found.")
 
+    chunks = frame_chunks(n_elem_ref, n_sl_ref, n_fz_ref)
     print(
         f"Allocating Zarr: ({total_frames}, {n_elem_ref}, {n_sl_ref}, "
-        f"{n_fz_ref}, 2, {N_SAMPLES_OUT}) float32, chunks={CHUNKS}",
+        f"{n_fz_ref}, 2, {N_SAMPLES_OUT}) float32, chunks={chunks}",
         flush=True,
     )
 
@@ -236,7 +248,7 @@ def main() -> None:
         arr = root.create_dataset(
             ARRAY_NAME,
             shape=(total_frames, n_elem_ref, n_sl_ref, n_fz_ref, 2, N_SAMPLES_OUT),
-            chunks=CHUNKS,
+            chunks=chunks,
             dtype="float32",
             compressor=compressor,
         )
@@ -304,7 +316,7 @@ def main() -> None:
         "array_name": ARRAY_NAME,
         "shape": [global_idx, n_elem_ref, n_sl_ref, n_fz_ref, 2, N_SAMPLES_OUT],
         "axes": ["frame", "transducer", "scanline", "focal_zone", "iq", "sample"],
-        "chunks": list(CHUNKS),
+        "chunks": list(chunks),
         "dtype": "float32",
         "compressor": {"id": "blosc", "cname": "lz4", "clevel": 5, "shuffle": Blosc.SHUFFLE},
         "depth_cutoff_samples": DEPTH_CUTOFF,
