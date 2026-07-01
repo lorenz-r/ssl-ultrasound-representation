@@ -246,6 +246,17 @@ def main() -> None:
                         help="Create the repo as private (default: public).")
     parser.add_argument("--no-readme", action="store_true",
                         help="Skip auto-generating and uploading README.md.")
+    parser.add_argument("--no-purge", action="store_true",
+                        help="Keep any existing repo chunk files not present in this "
+                             "upload. By default (single-commit --simple-upload mode) the "
+                             "zarr directory is fully replaced: stale chunks (e.g. from a "
+                             "previous build with a different frame count) are deleted in "
+                             "the same commit. Ignored in the default resumable uploader.")
+    parser.add_argument("--simple-upload", action="store_true",
+                        help="Use the single-commit upload_folder path (supports --purge). "
+                             "The default is the batched, parallel upload_large_folder, "
+                             "which is far more robust for this ~30GB / 18k-file folder but "
+                             "cannot purge stale files in the same operation.")
     parser.add_argument("--token", default=None,
                         help="HF token. Falls through $HF_TOKEN / $HUGGING_FACE_HUB_TOKEN "
                              "/ cached huggingface-cli login if omitted.")
@@ -282,8 +293,9 @@ def main() -> None:
         print(f"  private  = {args.private}")
         print(f"  type     = dataset")
         print("[dry-run] would upload:")
+        purge_note = "" if args.no_purge else ", replacing existing contents (purge stale chunks)"
         print(f"  - {DEFAULT_ZARR_DIRNAME}/  (unzipped chunk tree from "
-              f"{zip_path.name}, {zip_size / 1e9:.2f} GB)")
+              f"{zip_path.name}, {zip_size / 1e9:.2f} GB{purge_note})")
         print(f"  - {meta_path.name}")
         if readme_text is not None:
             print(f"  - README.md  ({len(readme_text)} chars)")
@@ -328,21 +340,58 @@ def main() -> None:
         _upload(Path("README.md"), "README.md", content=readme_text.encode("utf-8"))
     _upload(meta_path, DEFAULT_METADATA_FILENAME)
 
-    # Explode the zip into a per-chunk directory tree and upload it as a folder so
-    # each chunk becomes its own HF file (enables partial / first-N-frame fetches).
-    with tempfile.TemporaryDirectory(prefix="zarr_upload_") as tmp:
-        zarr_dir = Path(tmp) / DEFAULT_ZARR_DIRNAME
-        print(f"Unpacking {zip_path.name} → {DEFAULT_ZARR_DIRNAME}/ …", flush=True)
-        n_files = extract_zarr_zip(zip_path, zarr_dir)
-        print(f"Uploading {DEFAULT_ZARR_DIRNAME}/ ({n_files} chunk files)…", flush=True)
-        api.upload_folder(
-            folder_path=str(zarr_dir),
-            path_in_repo=DEFAULT_ZARR_DIRNAME,
-            repo_id=args.repo_id,
-            repo_type="dataset",
-            commit_message=commit_message,
-            revision=args.revision,
-        )
+    # Explode the zip into a per-chunk directory tree and upload it so each chunk
+    # becomes its own HF file (enables partial / first-N-frame fetches).
+    if args.simple_upload:
+        # Single-commit path: supports purging stale files atomically, but for a
+        # ~30GB / 18k-file folder it frequently stalls near the end.
+        with tempfile.TemporaryDirectory(prefix="zarr_upload_") as tmp:
+            zarr_dir = Path(tmp) / DEFAULT_ZARR_DIRNAME
+            print(f"Unpacking {zip_path.name} → {DEFAULT_ZARR_DIRNAME}/ …", flush=True)
+            n_files = extract_zarr_zip(zip_path, zarr_dir)
+            delete_patterns = None if args.no_purge else ["*"]
+            purge_note = "" if args.no_purge else " (replacing existing contents)"
+            print(
+                f"Uploading {DEFAULT_ZARR_DIRNAME}/ ({n_files} chunk files){purge_note}…",
+                flush=True,
+            )
+            api.upload_folder(
+                folder_path=str(zarr_dir),
+                path_in_repo=DEFAULT_ZARR_DIRNAME,
+                repo_id=args.repo_id,
+                repo_type="dataset",
+                commit_message=commit_message,
+                revision=args.revision,
+                delete_patterns=delete_patterns,
+            )
+    else:
+        # Default: batched, parallel uploader. upload_large_folder has no
+        # path_in_repo, so we extract into a temp *parent* and keep the
+        # DEFAULT_ZARR_DIRNAME/ prefix inside it. Batched commits + server-side
+        # dedup mean an interrupted run still makes progress and a re-run skips
+        # already-uploaded chunks, so a persistent dir isn't needed.
+        with tempfile.TemporaryDirectory(prefix="zarr_upload_") as tmp:
+            zarr_dir = Path(tmp) / DEFAULT_ZARR_DIRNAME
+            print(f"Unpacking {zip_path.name} → {DEFAULT_ZARR_DIRNAME}/ …", flush=True)
+            extract_zarr_zip(zip_path, zarr_dir)
+            if not args.no_purge:
+                print(
+                    "Note: resumable uploader cannot purge stale files. For a "
+                    "same-shape re-upload every chunk path is overwritten anyway; "
+                    "pass --simple-upload if you need stale-file deletion.",
+                    flush=True,
+                )
+            print(
+                f"Uploading {DEFAULT_ZARR_DIRNAME}/ via upload_large_folder…",
+                flush=True,
+            )
+            api.upload_large_folder(
+                repo_id=args.repo_id,
+                repo_type="dataset",
+                folder_path=str(tmp),
+                revision=args.revision,
+                print_report=True,
+            )
 
     print(f"\nDone. Repo: https://huggingface.co/datasets/{args.repo_id}", flush=True)
 
