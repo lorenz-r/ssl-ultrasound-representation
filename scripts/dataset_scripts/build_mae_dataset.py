@@ -99,9 +99,15 @@ def _combine_rx_halves_streaming(
             continue
         iq = pymust.rf2iq(rf.T.astype(np.float64), fs, fc)  # (n_samp, n_ch)
         n_ch = iq.shape[1]
-        phys = (rx_ap - 1) + np.arange(n_ch)
+        # HVMux receive aperture maps hardware channels onto physical elements
+        # *cyclically*, not linearly: element (ap0+i) is read by channel
+        # (ap0+i) mod n_ch (cf. the [aperture:end, 1:aperture-1] reorder in
+        # ProcessDataMultiFocal_L12_3v.m). For rx_ap=65 that means channels
+        # 65-128 -> elements 65-128 and channels 1-64 -> elements 129-192.
+        phys = (rx_ap - 1) + np.arange(n_ch)          # destination physical element
+        src = ((rx_ap - 1) + np.arange(n_ch)) % n_ch  # source hardware channel
         valid = phys < n_elem
-        iq192[:, phys[valid]] += iq[:, valid]
+        iq192[:, phys[valid]] += iq[:, src[valid]]
         count[phys[valid]] += 1.0
 
     np.divide(iq192, count[np.newaxis, :], out=iq192, where=count[np.newaxis, :] > 0)
