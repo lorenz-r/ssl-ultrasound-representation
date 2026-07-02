@@ -23,6 +23,10 @@ Usage:
     poetry run python scripts/dataset_scripts/signal_decay.py --group-by file
     poetry run python scripts/dataset_scripts/signal_decay.py \
         --frames 0 1 2 --out figures/signal_decay.png
+
+    # Against the HF dataset repo instead of a local zarr.zip build:
+    poetry run python scripts/dataset_scripts/signal_decay.py \
+        --hf-repo user/ssl-ultrasound-rats --max-frames 16
 """
 
 from __future__ import annotations
@@ -37,7 +41,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from ssl_ultrasound_representation.dataset.dataset import load_local_dataset
+from ssl_ultrasound_representation.dataset.dataset import load_dataset, load_local_dataset
 
 
 def per_depth_rms(frame: np.ndarray) -> np.ndarray:
@@ -98,6 +102,31 @@ def main() -> None:
         default="data/processed/ultrasonic_dataset.metadata.json",
     )
     parser.add_argument(
+        "--hf-repo",
+        dest="hf_repo",
+        help="HF dataset repo (e.g. user/ssl-ultrasound-rats) to pull from "
+        "instead of the local --data-zip/--metadata build.",
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        dest="max_frames",
+        help="HF only: only download/open the first N frames' chunks.",
+    )
+    parser.add_argument(
+        "--hf-token",
+        dest="hf_token",
+        help="HF auth token for the download (higher rate limits). "
+        "Falls back to $HF_TOKEN / $HUGGING_FACE_HUB_TOKEN / cached login.",
+    )
+    parser.add_argument(
+        "--download-workers",
+        type=int,
+        default=8,
+        dest="download_workers",
+        help="HF only: chunk-download concurrency.",
+    )
+    parser.add_argument(
         "--beamform-params",
         default="configs/beamform_params.json",
         dest="beamform_params",
@@ -105,7 +134,15 @@ def main() -> None:
     parser.add_argument("--out", default="figures/signal_decay.png")
     args = parser.parse_args()
 
-    arr, meta = load_local_dataset(args.data_zip, args.metadata)
+    if args.hf_repo:
+        arr, meta = load_dataset(
+            args.hf_repo,
+            max_frames=args.max_frames,
+            token=args.hf_token,
+            max_workers=args.download_workers,
+        )
+    else:
+        arr, meta = load_local_dataset(args.data_zip, args.metadata)
     params = json.loads(Path(args.beamform_params).read_text())
 
     # Provenance: map each global frame index -> its group label (subject/file).
