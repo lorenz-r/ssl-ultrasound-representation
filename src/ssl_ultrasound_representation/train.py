@@ -38,6 +38,23 @@ def normalize_frame(t: torch.Tensor) -> torch.Tensor:
 # build_split_datasets); the transform only standardizes.
 
 
+class _SingleSampleDataset(torch.utils.data.Dataset):
+    """Wraps exactly one item from `base` as a length-1 dataset.
+
+    Used by `overfit_single_sample`: train and val loaders both wrap the same
+    instance, so every epoch trains and validates on the identical sample.
+    """
+
+    def __init__(self, base, index: int = 0):
+        self._sample = base[index]
+
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, i: int):
+        return self._sample
+
+
 def default_device() -> str:
     if torch.cuda.is_available():
         return "cuda"
@@ -68,9 +85,15 @@ def train(config: dict | None = None) -> dict:
     # ------------------------------------------------------------------
     # Hyperparameters
     # ------------------------------------------------------------------
+    # Single-sample overfit: train and val both see the exact same one frame,
+    # every epoch, to sanity-check the architecture can memorize it. That
+    # needs far more epochs than a normal run to actually converge, so the
+    # epochs default scales up automatically unless the caller pins it.
+    overfit_single_sample = config.get("overfit_single_sample", False)
+
     lr = config.get("lr", 1.5e-4)
     weight_decay = config.get("weight_decay", 0.05)
-    epochs = config.get("epochs", 200)
+    epochs = config.get("epochs", 2000 if overfit_single_sample else 200)
     warmup_epochs = config.get("warmup_epochs", 20)
     batch_size = config.get("batch_size", 2)
     # Preloaded data lives in shared RAM — workers would only add respawn
@@ -113,7 +136,13 @@ def train(config: dict | None = None) -> dict:
     use_wandb = config.get("use_wandb", True)
     wandb_project = config.get("wandb_project", "ssl-ultrasound-mae")
     run_name = config.get("run_name")
-    vis_every = config.get("vis_every", 10)  # beamformed snapshot cadence (epochs)
+    # Beamformed snapshot cadence (epochs). Single-sample overfit runs many
+    # more epochs than usual, so a fixed cadence of 10 would dump far too many
+    # beamform snapshots; scale the default cadence with the (possibly bumped)
+    # epoch count instead, targeting ~20 snapshots over the whole run.
+    vis_every = config.get(
+        "vis_every", max(1, epochs // 20) if overfit_single_sample else 10
+    )
     n_vis_frames = config.get("n_vis_frames", 2)
     beamform_params = config.get("beamform_params", "configs/beamform_params.json")
 
@@ -199,6 +228,19 @@ def train(config: dict | None = None) -> dict:
         share_memory=preload and num_workers > 0,
     )
 
+    if overfit_single_sample:
+        # Collapse train/val onto one shared frame: same sample every epoch,
+        # so train and val loss diverging is purely a memorization signal
+        # rather than a generalization one.
+        base = splits["train"] if len(splits["train"]) else splits["val"]
+        if len(base) == 0:
+            raise ValueError(
+                "overfit_single_sample requires at least one frame in the "
+                "dataset, but both train and val splits are empty."
+            )
+        single = _SingleSampleDataset(base, 0)
+        splits = {"train": single, "val": single, "test": splits["test"]}
+
     # Persistent workers avoid respawning (and re-reading the first frame) at
     # every epoch boundary; pointless when num_workers == 0.
     loader_kwargs = dict(
@@ -244,6 +286,7 @@ def train(config: dict | None = None) -> dict:
             "train_samples": len(splits["train"]),
             "val_samples": len(splits["val"]),
             "device": device,
+            "overfit_single_sample": overfit_single_sample,
         },
         enabled=use_wandb,
         project=wandb_project,
@@ -464,6 +507,16 @@ def _cli() -> dict:
     )
     parser.add_argument(
         "--save-checkpoints", action="store_true", dest="save_checkpoints"
+    )
+    parser.add_argument(
+        "--overfit-single-sample",
+        action="store_true",
+        dest="overfit_single_sample",
+        help="Debug flag: train and validate on the exact same single frame "
+        "every epoch, to sanity-check the architecture can memorize it. "
+        "Automatically bumps --epochs to 2000 and stretches --vis-every to "
+        "keep beamform snapshots sparse over the long run, unless you pass "
+        "those flags explicitly.",
     )
     args = vars(parser.parse_args())
 
