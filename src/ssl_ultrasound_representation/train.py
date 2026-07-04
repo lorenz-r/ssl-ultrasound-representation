@@ -149,6 +149,10 @@ def train(config: dict | None = None) -> dict:
     # Data source: HF dataset repo (cluster) or local zarr.zip (default)
     hf_repo = config.get("hf_repo")
     max_frames = config.get("max_frames")  # HF only: fetch just the first N frames
+    # Only one frame is ever used in this mode, so cap the HF download to it
+    # instead of pulling the full dataset (unless the caller pins max_frames).
+    if max_frames is None and hf_repo and overfit_single_sample:
+        max_frames = 1
     data_zip = config.get("data_zip", "data/processed/ultrasonic_dataset.zarr.zip")
     data_metadata = config.get(
         "data_metadata", "data/processed/ultrasonic_dataset.metadata.json"
@@ -516,7 +520,8 @@ def _cli() -> dict:
         "every epoch, to sanity-check the architecture can memorize it. "
         "Automatically bumps --epochs to 2000 and stretches --vis-every to "
         "keep beamform snapshots sparse over the long run, unless you pass "
-        "those flags explicitly.",
+        "those flags explicitly. With --hf-repo, also caps --max-frames to 1 "
+        "so only that one frame is downloaded, unless --max-frames is set.",
     )
     args = vars(parser.parse_args())
 
