@@ -36,6 +36,7 @@ class SignalMAE(nn.Module):
         mask_ratio=0.0,
         recon_head="linear",
         patch_embed="conv",
+        dropout=0.1,
     ):
         super().__init__()
         assert recon_head in ("linear", "conv"), (
@@ -119,6 +120,7 @@ class SignalMAE(nn.Module):
             d_model=embed_dim,
             nhead=encoder_heads,
             dim_feedforward=dim_feedforward,
+            dropout=dropout,
             activation="gelu",
             batch_first=True,
             norm_first=True,
@@ -139,6 +141,7 @@ class SignalMAE(nn.Module):
             d_model=decoder_embed_dim,
             nhead=decoder_heads,
             dim_feedforward=dim_feedforward,
+            dropout=dropout,
             activation="gelu",
             batch_first=True,
             norm_first=True,
