@@ -35,10 +35,19 @@ class SignalMAE(nn.Module):
         dim_feedforward=512,
         mask_ratio=0.0,
         recon_head="linear",
+        patch_embed="conv",
     ):
         super().__init__()
         assert recon_head in ("linear", "conv"), (
             f"recon_head must be 'linear' or 'conv', got {recon_head!r}"
+        )
+        assert patch_embed in ("conv", "linear"), (
+            f"patch_embed must be 'conv' or 'linear', got {patch_embed!r}"
+        )
+        assert recon_head != "conv" or patch_embed == "conv", (
+            "recon_head='conv' needs the conv patch embedder's bottleneck "
+            "feature shape to build its inverse transpose-conv stack; use "
+            "patch_embed='conv' (the default) or switch recon_head='linear'."
         )
         assert n_samples % depth_window == 0, (
             f"n_samples ({n_samples}) must be divisible by depth_window ({depth_window})"
@@ -62,33 +71,49 @@ class SignalMAE(nn.Module):
         self.decoder_embed_dim = decoder_embed_dim
         self.mask_ratio = mask_ratio
         self.recon_head_type = recon_head
+        self.patch_embed_type = patch_embed
 
         # -------------------------------------------------------------------------
         # 1. MAE ENCODER MODULES
         # -------------------------------------------------------------------------
-        # Conv patch embedder over (transducer_window, depth_window), IQ as channels.
-        self.patch_conv = nn.Sequential(
-            nn.Conv2d(2, 16, kernel_size=5, stride=2, padding=2),
-            nn.GELU(),
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.GELU(),
-        )
-        # Record the spatial size after each conv so the decoder's transpose
-        # stack can invert the exact down-sampling (output_padding picked per
-        # axis), independent of the chosen window sizes.
-        with torch.no_grad():
-            sizes = [(transducer_window, depth_window)]
-            t = torch.zeros(1, 2, transducer_window, depth_window)
-            for m in self.patch_conv:
-                t = m(t)
-                if isinstance(m, nn.Conv2d):
-                    sizes.append(tuple(t.shape[-2:]))
-            feat = t
-        self._feat_chw = tuple(feat.shape[1:])  # (C, H, W) at the bottleneck
-        self._conv_sizes = sizes  # [(tw, w), s1, s2, s3]
-        self.patch_proj = nn.Linear(feat.flatten(1).shape[1], embed_dim)
+        # Patch embedding. Two options:
+        #  * "conv": small CNN over (transducer_window, depth_window), IQ as
+        #    channels, downsampled 8x (3 stride-2 convs) before the linear
+        #    projection to embed_dim. Cheap, but the IQ carrier here is
+        #    demodulated near fc≈fs (~11 cycles per depth_window, normalized
+        #    freq ≈0.26 cycles/sample) — a single stride-2 step already pushes
+        #    that past the new grid's Nyquist, so this downsampling risks
+        #    *aliasing* the axial carrier (destroying it, not just compressing
+        #    it) before the transformer or any embed width ever sees it. Default,
+        #    kept for parameter efficiency.
+        #  * "linear": flat Linear(patch_dim, embed_dim) — no spatial striding,
+        #    so no aliasing risk. Used to A/B-test whether the conv embedder's
+        #    downsampling is what caps single-sample-overfit loss.
+        if patch_embed == "conv":
+            self.patch_conv = nn.Sequential(
+                nn.Conv2d(2, 16, kernel_size=5, stride=2, padding=2),
+                nn.GELU(),
+                nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+                nn.GELU(),
+                nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+                nn.GELU(),
+            )
+            # Record the spatial size after each conv so the decoder's transpose
+            # stack can invert the exact down-sampling (output_padding picked per
+            # axis), independent of the chosen window sizes.
+            with torch.no_grad():
+                sizes = [(transducer_window, depth_window)]
+                t = torch.zeros(1, 2, transducer_window, depth_window)
+                for m in self.patch_conv:
+                    t = m(t)
+                    if isinstance(m, nn.Conv2d):
+                        sizes.append(tuple(t.shape[-2:]))
+                feat = t
+            self._feat_chw = tuple(feat.shape[1:])  # (C, H, W) at the bottleneck
+            self._conv_sizes = sizes  # [(tw, w), s1, s2, s3]
+            self.patch_proj = nn.Linear(feat.flatten(1).shape[1], embed_dim)
+        else:
+            self.patch_embed_linear = nn.Linear(self.patch_dim, embed_dim)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
@@ -159,6 +184,16 @@ class SignalMAE(nn.Module):
                     deconv_layers.append(nn.GELU())
             self.patch_deconv = nn.Sequential(*deconv_layers)
 
+    def _embed_patches(self, patches):
+        """(B, L, 2, tw, w) -> (B, L, embed_dim), per the `patch_embed` type."""
+        B, L = patches.shape[:2]
+        if self.patch_embed_type == "conv":
+            tok = self.patch_conv(
+                patches.reshape(B * L, 2, self.transducer_window, self.depth_window)
+            )
+            return self.patch_proj(tok.flatten(1)).view(B, L, self.embed_dim)
+        return self.patch_embed_linear(patches.flatten(2))
+
     def forward(self, x, pos_embed):
         """
         Args:
@@ -176,11 +211,8 @@ class SignalMAE(nn.Module):
         B, L = patches.shape[:2]
         target = patches.flatten(2)
 
-        # --- 1. Patch embedding (conv) + positional encoding ---
-        tok = self.patch_conv(
-            patches.reshape(B * L, 2, self.transducer_window, self.depth_window)
-        )
-        tok = self.patch_proj(tok.flatten(1)).view(B, L, self.embed_dim)
+        # --- 1. Patch embedding + positional encoding ---
+        tok = self._embed_patches(patches)
         tok = tok + pos_embed.unsqueeze(0).to(tok.dtype)
 
         # --- 2. Random masking over the token grid ---
@@ -232,11 +264,7 @@ class SignalMAE(nn.Module):
             Latent tensor as described by ``pool``.
         """
         patches = self.patchify(x)
-        B, L = patches.shape[:2]
-        tok = self.patch_conv(
-            patches.reshape(B * L, 2, self.transducer_window, self.depth_window)
-        )
-        tok = self.patch_proj(tok.flatten(1)).view(B, L, self.embed_dim)
+        tok = self._embed_patches(patches)
         tok = tok + pos_embed.unsqueeze(0).to(tok.dtype)
         z = self.encoder_norm(self.encoder(tok))  # (B, L, embed_dim)
         if pool == "mean":

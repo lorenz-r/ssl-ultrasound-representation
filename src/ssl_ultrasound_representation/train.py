@@ -212,6 +212,12 @@ def train(config: dict | None = None) -> dict:
         # "linear": expressive per-patch head that can reconstruct the axial
         # carrier (default); "conv": band-limited transpose-conv head.
         "recon_head": config.get("recon_head", "linear"),
+        # "conv": default patch embedder — 3 stride-2 convs downsample each
+        # patch 8x before projecting to embed_dim, cheap but risks aliasing
+        # the near-Nyquist axial carrier before the transformer sees it.
+        # "linear": flat Linear(patch_dim, embed_dim), no striding/aliasing —
+        # for A/B-testing whether that's what caps single-sample overfit loss.
+        "patch_embed": config.get("patch_embed", "conv"),
     }
     model = SignalMAE(**model_config).to(device)
 
@@ -498,6 +504,18 @@ def _cli() -> dict:
         dest="recon_head",
         help="Reconstruction head: 'linear' (default, expressive, reconstructs "
         "the axial carrier) or 'conv' (band-limited transpose-conv stack).",
+    )
+    parser.add_argument(
+        "--patch-embed",
+        choices=["conv", "linear"],
+        dest="patch_embed",
+        help="Encoder patch embedding: 'conv' (default) downsamples each "
+        "patch 8x via 3 stride-2 convs before projecting to embed_dim — "
+        "risks aliasing the near-Nyquist axial carrier before the "
+        "transformer sees it. 'linear' is a flat Linear(patch_dim, "
+        "embed_dim) with no striding, to A/B-test whether that aliasing is "
+        "what caps single-sample overfit loss. Incompatible with "
+        "--recon-head conv.",
     )
     parser.add_argument("--mask-ratio", type=float, dest="mask_ratio")
     parser.add_argument("--loss-on", choices=["all", "masked"], dest="loss_on")
