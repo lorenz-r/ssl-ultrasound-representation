@@ -193,7 +193,18 @@ def train(config: dict | None = None) -> dict:
         "embed_dim": embed_dim,
         "encoder_depth": config.get("encoder_depth", 8),
         "encoder_heads": config.get("encoder_heads", 8),
-        "decoder_embed_dim": config.get("decoder_embed_dim", 128),
+        # The narrow-decoder asymmetry from the MAE paper assumes masking: the
+        # decoder reconstructs hidden patches by attending to full-fidelity
+        # visible ones, an easier task that tolerates a smaller channel. At
+        # mask_ratio=0 (plain autoencoder, e.g. overfit_single_sample) there
+        # are no visible tokens to lean on — every patch must round-trip
+        # through the decoder bottleneck itself, so shrinking it below the
+        # encoder's embed_dim only adds a second, tighter rank ceiling with no
+        # compute benefit. Match embed_dim in that case; keep the usual 128
+        # otherwise. Still explicitly overridable either way.
+        "decoder_embed_dim": config.get(
+            "decoder_embed_dim", embed_dim if mask_ratio == 0 else 128
+        ),
         "decoder_depth": config.get("decoder_depth", 4),
         "decoder_heads": config.get("decoder_heads", 8),
         "dim_feedforward": config.get("dim_feedforward", 1024),
