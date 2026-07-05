@@ -325,9 +325,18 @@ def train(config: dict | None = None) -> dict:
     total_steps = epochs * steps_per_epoch
     warmup_steps = warmup_epochs * steps_per_epoch
 
+    # Single-sample overfit is a memorization sprint, not a generalization run:
+    # reconstruction loss commonly plateaus at the trivial "predict zero" basin
+    # before escaping to actually fit the sample, at an unpredictable step. A
+    # cosine decay tied to the fixed epoch count burns down LR while stuck in
+    # that plateau, so by the time it escapes the model is LR-starved. Skip the
+    # decay entirely here — hold LR at peak after warmup — since there's no
+    # generalization optimum to converge cleanly toward.
     def lr_lambda(step: int) -> float:
         if step < warmup_steps:
             return (step + 1) / max(warmup_steps, 1)
+        if overfit_single_sample:
+            return 1.0
         progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
