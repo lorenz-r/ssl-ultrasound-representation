@@ -15,8 +15,9 @@ class SignalMAE(nn.Module):
     and axial blocks, so reconstruction requires cross-scanline (anatomy),
     cross-aperture (receive coherence) and cross-depth structure.
 
-    Patches are embedded with a small CNN over (transducer, depth) instead
-    of a flat linear layer to keep parameters reasonable.
+    Patches are embedded with a flat linear projection by default (see
+    `patch_embed`); a small CNN over (transducer, depth) is available as an
+    alternative but risks aliasing the near-Nyquist axial carrier.
     """
 
     def __init__(
@@ -35,7 +36,7 @@ class SignalMAE(nn.Module):
         dim_feedforward=512,
         mask_ratio=0.0,
         recon_head="linear",
-        patch_embed="conv",
+        patch_embed="linear",
         dropout=0.1,
     ):
         super().__init__()
@@ -48,7 +49,7 @@ class SignalMAE(nn.Module):
         assert recon_head != "conv" or patch_embed == "conv", (
             "recon_head='conv' needs the conv patch embedder's bottleneck "
             "feature shape to build its inverse transpose-conv stack; use "
-            "patch_embed='conv' (the default) or switch recon_head='linear'."
+            "patch_embed='conv' or switch recon_head='linear' (the default)."
         )
         assert n_samples % depth_window == 0, (
             f"n_samples ({n_samples}) must be divisible by depth_window ({depth_window})"
@@ -78,18 +79,19 @@ class SignalMAE(nn.Module):
         # 1. MAE ENCODER MODULES
         # -------------------------------------------------------------------------
         # Patch embedding. Two options:
+        #  * "linear": flat Linear(patch_dim, embed_dim) — no spatial striding,
+        #    so no aliasing risk. Default: single-sample-overfit testing showed
+        #    the conv embedder's downsampling was capping achievable
+        #    reconstruction loss (aliasing the axial carrier, not just
+        #    compressing it), and switching to this fixed it.
         #  * "conv": small CNN over (transducer_window, depth_window), IQ as
         #    channels, downsampled 8x (3 stride-2 convs) before the linear
-        #    projection to embed_dim. Cheap, but the IQ carrier here is
-        #    demodulated near fc≈fs (~11 cycles per depth_window, normalized
-        #    freq ≈0.26 cycles/sample) — a single stride-2 step already pushes
-        #    that past the new grid's Nyquist, so this downsampling risks
-        #    *aliasing* the axial carrier (destroying it, not just compressing
-        #    it) before the transformer or any embed width ever sees it. Default,
-        #    kept for parameter efficiency.
-        #  * "linear": flat Linear(patch_dim, embed_dim) — no spatial striding,
-        #    so no aliasing risk. Used to A/B-test whether the conv embedder's
-        #    downsampling is what caps single-sample-overfit loss.
+        #    projection to embed_dim. Cheaper in parameters, but the IQ carrier
+        #    here is demodulated near fc≈fs (~11 cycles per depth_window,
+        #    normalized freq ≈0.26 cycles/sample) — a single stride-2 step
+        #    already pushes that past the new grid's Nyquist, aliasing the
+        #    axial carrier before the transformer or any embed width ever sees
+        #    it. Kept for comparison.
         if patch_embed == "conv":
             self.patch_conv = nn.Sequential(
                 nn.Conv2d(2, 16, kernel_size=5, stride=2, padding=2),

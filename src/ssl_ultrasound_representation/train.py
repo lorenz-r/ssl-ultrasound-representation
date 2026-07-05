@@ -151,6 +151,12 @@ def train(config: dict | None = None) -> dict:
     )
     n_vis_frames = config.get("n_vis_frames", 2)
     beamform_params = config.get("beamform_params", "configs/beamform_params.json")
+    # Cadence (epochs) for syncing the best checkpoint to wandb. The local
+    # torch.save below is cheap and happens on every improving epoch; the
+    # wandb artifact upload blocks on a server-commit wait before pruning old
+    # versions, which dominates epoch time on larger models if done that
+    # often. Decoupled from vis_every since checkpoint uploads are heavier.
+    checkpoint_every = config.get("checkpoint_every", 10)
 
     # Data source: HF dataset repo (cluster) or local zarr.zip (default)
     hf_repo = config.get("hf_repo")
@@ -212,12 +218,12 @@ def train(config: dict | None = None) -> dict:
         # "linear": expressive per-patch head that can reconstruct the axial
         # carrier (default); "conv": band-limited transpose-conv head.
         "recon_head": config.get("recon_head", "linear"),
-        # "conv": default patch embedder — 3 stride-2 convs downsample each
-        # patch 8x before projecting to embed_dim, cheap but risks aliasing
-        # the near-Nyquist axial carrier before the transformer sees it.
         # "linear": flat Linear(patch_dim, embed_dim), no striding/aliasing —
-        # for A/B-testing whether that's what caps single-sample overfit loss.
-        "patch_embed": config.get("patch_embed", "conv"),
+        # default, since the conv embedder's downsampling was found to alias
+        # the near-Nyquist axial carrier and cap achievable reconstruction.
+        # "conv": 3 stride-2 convs downsample each patch 8x first — cheaper in
+        # parameters, kept for comparison.
+        "patch_embed": config.get("patch_embed", "linear"),
         "dropout": config.get("dropout", 0.1),
     }
     model = SignalMAE(**model_config).to(device)
@@ -360,6 +366,7 @@ def train(config: dict | None = None) -> dict:
 
     scheduler = LambdaLR(optimizer, lr_lambda)
 
+    ckpt_path = "checkpoints/best_mae_checkpoint.pt"
     if save_checkpoints:
         Path("checkpoints").mkdir(parents=True, exist_ok=True)
 
@@ -369,6 +376,9 @@ def train(config: dict | None = None) -> dict:
     # Loss configuration shared by the train/val passes.
     loss_kwargs = dict(loss_on=loss_on)
     best_val_loss = float("inf")
+    best_epoch = None
+    best_train_loss = None
+    last_synced_best_epoch = None  # last epoch whose checkpoint was pushed to wandb
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -451,12 +461,16 @@ def train(config: dict | None = None) -> dict:
             monitor.log_reconstructions(epoch, model, pos_embed, device)
 
         # ------------------------------------------------------------------
-        # Checkpoint
+        # Checkpoint — local save is cheap and happens on every improving
+        # epoch; the wandb sync (upload + blocking prune wait) is not, so
+        # it's throttled to `checkpoint_every` epochs, independent of how
+        # often the local best actually changes.
         # ------------------------------------------------------------------
         if val_batches and avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
+            best_train_loss = avg_train_loss
+            best_epoch = epoch
             if save_checkpoints:
-                ckpt_path = "checkpoints/best_mae_checkpoint.pt"
                 torch.save(
                     {
                         "epoch": epoch,
@@ -470,19 +484,27 @@ def train(config: dict | None = None) -> dict:
                     },
                     ckpt_path,
                 )
-                # Version the best checkpoint in wandb so the eval suite can pull
-                # it by alias ("best" / "<run>:latest") instead of a local path.
-                monitor.log_checkpoint(
-                    ckpt_path,
-                    aliases=["best", f"epoch-{epoch}"],
-                    metadata={
-                        "epoch": epoch,
-                        "val_loss": avg_val_loss,
-                        "train_loss": avg_train_loss,
-                        "model_config": model_config,
-                    },
-                    keep_last=1,
-                )
+
+        if (
+            save_checkpoints
+            and best_epoch is not None
+            and best_epoch != last_synced_best_epoch
+            and (epoch % checkpoint_every == 0 or epoch == epochs)
+        ):
+            # Version the best checkpoint in wandb so the eval suite can pull
+            # it by alias ("best" / "<run>:latest") instead of a local path.
+            monitor.log_checkpoint(
+                ckpt_path,
+                aliases=["best", f"epoch-{best_epoch}"],
+                metadata={
+                    "epoch": best_epoch,
+                    "val_loss": best_val_loss,
+                    "train_loss": best_train_loss,
+                    "model_config": model_config,
+                },
+                keep_last=1,
+            )
+            last_synced_best_epoch = best_epoch
 
     monitor.finish(summary={"best_val_loss": best_val_loss})
     print(f"Training complete. Best val loss: {best_val_loss:.6f}")
@@ -515,13 +537,13 @@ def _cli() -> dict:
         "--patch-embed",
         choices=["conv", "linear"],
         dest="patch_embed",
-        help="Encoder patch embedding: 'conv' (default) downsamples each "
-        "patch 8x via 3 stride-2 convs before projecting to embed_dim — "
-        "risks aliasing the near-Nyquist axial carrier before the "
-        "transformer sees it. 'linear' is a flat Linear(patch_dim, "
-        "embed_dim) with no striding, to A/B-test whether that aliasing is "
-        "what caps single-sample overfit loss. Incompatible with "
-        "--recon-head conv.",
+        help="Encoder patch embedding: 'linear' (default) is a flat "
+        "Linear(patch_dim, embed_dim), no striding/aliasing. 'conv' "
+        "downsamples each patch 8x via 3 stride-2 convs before projecting to "
+        "embed_dim — cheaper in parameters, but risks aliasing the "
+        "near-Nyquist axial carrier before the transformer sees it (this is "
+        "what capped single-sample-overfit loss before switching the "
+        "default to 'linear'). Incompatible with --recon-head conv.",
     )
     parser.add_argument("--mask-ratio", type=float, dest="mask_ratio")
     parser.add_argument("--loss-on", choices=["all", "masked"], dest="loss_on")
@@ -566,6 +588,16 @@ def _cli() -> dict:
     parser.add_argument("--beamform-params", dest="beamform_params")
     parser.add_argument("--run-name", dest="run_name")
     parser.add_argument("--vis-every", type=int, dest="vis_every")
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        dest="checkpoint_every",
+        help="Epoch cadence (default 10) for syncing the best checkpoint to "
+        "wandb. The local torch.save still happens on every improving "
+        "epoch (cheap); this only throttles the wandb upload + prune, "
+        "which blocks on a server-commit wait and dominates epoch time on "
+        "larger models if done every epoch.",
+    )
     parser.add_argument("--focal-zone", type=int, dest="focal_zone")
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument(
