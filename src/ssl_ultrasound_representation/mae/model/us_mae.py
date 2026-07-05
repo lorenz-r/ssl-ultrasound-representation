@@ -34,8 +34,12 @@ class SignalMAE(nn.Module):
         decoder_heads=4,
         dim_feedforward=512,
         mask_ratio=0.0,
+        recon_head="linear",
     ):
         super().__init__()
+        assert recon_head in ("linear", "conv"), (
+            f"recon_head must be 'linear' or 'conv', got {recon_head!r}"
+        )
         assert n_samples % depth_window == 0, (
             f"n_samples ({n_samples}) must be divisible by depth_window ({depth_window})"
         )
@@ -57,6 +61,7 @@ class SignalMAE(nn.Module):
         self.embed_dim = embed_dim
         self.decoder_embed_dim = decoder_embed_dim
         self.mask_ratio = mask_ratio
+        self.recon_head_type = recon_head
 
         # -------------------------------------------------------------------------
         # 1. MAE ENCODER MODULES
@@ -116,32 +121,43 @@ class SignalMAE(nn.Module):
         self.decoder = nn.TransformerEncoder(decoder_layer, num_layers=decoder_depth)
         self.decoder_norm = nn.LayerNorm(decoder_embed_dim)
 
-        # Reconstruction head: project each decoder token back to the bottleneck
-        # feature map, then up-sample to the patch with a transpose-conv stack. A
-        # flat Linear(decoder_dim -> patch_dim) can only emit the smooth
-        # conditional mean of an oscillatory IQ patch (blurry, speckle-free); a
-        # conv decoder can synthesize detail.
-        self.decoder_unproj = nn.Linear(decoder_embed_dim, feat.flatten(1).shape[1])
-        # Up-sampling target sizes mirror patch_conv in reverse; channels reverse
-        # patch_conv (64 -> 32 -> 16 -> 2 IQ).
-        up_sizes = [self._conv_sizes[-(i + 2)] for i in range(3)]
-        chans = [(64, 32), (32, 16), (16, 2)]
+        # Reconstruction head. Two options:
+        #  * "linear": a single Linear(decoder_dim -> patch_dim). Strictly the
+        #    most expressive per-patch map — it can emit an arbitrary value at
+        #    every IQ sample, so it is *not* band-limited and can reconstruct the
+        #    near-Nyquist axial carrier (the IQ here is demodulated at fc≈fs, so
+        #    each depth_window holds ~11 oscillation cycles). This is the default.
+        #  * "conv": project each decoder token to the bottleneck feature map and
+        #    up-sample with a transpose-conv stack. Cheaper params, but the coarse
+        #    (8x6) bottleneck low-passes the reconstruction — it cannot represent
+        #    the axial carrier, which floors even a single-sample overfit around
+        #    the low-frequency energy fraction (~0.7). Kept for comparison.
+        if recon_head == "linear":
+            self.recon_head = nn.Linear(decoder_embed_dim, self.patch_dim)
+        else:
+            self.decoder_unproj = nn.Linear(
+                decoder_embed_dim, feat.flatten(1).shape[1]
+            )
+            # Up-sampling target sizes mirror patch_conv in reverse; channels
+            # reverse patch_conv (64 -> 32 -> 16 -> 2 IQ).
+            up_sizes = [self._conv_sizes[-(i + 2)] for i in range(3)]
+            chans = [(64, 32), (32, 16), (16, 2)]
 
-        deconv_layers = []
-        for i, ((c_in, c_out), (k, s, p)) in enumerate(
-            zip(chans, [(3, 2, 1), (3, 2, 1), (5, 2, 2)])
-        ):
-            in_hw = self._conv_sizes[-(i + 1)]
-            out_hw = up_sizes[i]
-            out_pad = tuple(
-                out_hw[d] - ((in_hw[d] - 1) * s - 2 * p + k) for d in range(2)
-            )
-            deconv_layers.append(
-                nn.ConvTranspose2d(c_in, c_out, k, s, p, output_padding=out_pad)
-            )
-            if i < len(chans) - 1:
-                deconv_layers.append(nn.GELU())
-        self.patch_deconv = nn.Sequential(*deconv_layers)
+            deconv_layers = []
+            for i, ((c_in, c_out), (k, s, p)) in enumerate(
+                zip(chans, [(3, 2, 1), (3, 2, 1), (5, 2, 2)])
+            ):
+                in_hw = self._conv_sizes[-(i + 1)]
+                out_hw = up_sizes[i]
+                out_pad = tuple(
+                    out_hw[d] - ((in_hw[d] - 1) * s - 2 * p + k) for d in range(2)
+                )
+                deconv_layers.append(
+                    nn.ConvTranspose2d(c_in, c_out, k, s, p, output_padding=out_pad)
+                )
+                if i < len(chans) - 1:
+                    deconv_layers.append(nn.GELU())
+            self.patch_deconv = nn.Sequential(*deconv_layers)
 
     def forward(self, x, pos_embed):
         """
@@ -187,10 +203,13 @@ class SignalMAE(nn.Module):
 
         # --- 5. DECODER + reconstruction head ---
         y = self.decoder_norm(self.decoder(y))
-        y = self.decoder_unproj(y)  # (B, L, C*H*W)
-        y = y.reshape(B * L, *self._feat_chw)
-        y = self.patch_deconv(y)  # (B*L, 2, tw, w)
-        pred = y.reshape(B, L, self.patch_dim)
+        if self.recon_head_type == "linear":
+            pred = self.recon_head(y)  # (B, L, patch_dim)
+        else:
+            y = self.decoder_unproj(y)  # (B, L, C*H*W)
+            y = y.reshape(B * L, *self._feat_chw)
+            y = self.patch_deconv(y)  # (B*L, 2, tw, w)
+            pred = y.reshape(B, L, self.patch_dim)
 
         return pred, target, mask
 

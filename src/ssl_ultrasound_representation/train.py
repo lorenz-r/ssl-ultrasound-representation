@@ -91,10 +91,16 @@ def train(config: dict | None = None) -> dict:
     # epochs default scales up automatically unless the caller pins it.
     overfit_single_sample = config.get("overfit_single_sample", False)
 
-    lr = config.get("lr", 1.5e-4)
-    weight_decay = config.get("weight_decay", 0.05)
-    epochs = config.get("epochs", 2000 if overfit_single_sample else 200)
-    warmup_epochs = config.get("warmup_epochs", 20)
+    # Overfit is a memorization sprint, not a generalization run, so its defaults
+    # take the brakes off: no weight decay (it actively fights memorization), a
+    # much higher LR with a short warmup, and far fewer epochs — the point is to
+    # drive one frame's loss toward 0 as fast as possible, not to regularize.
+    lr = config.get("lr", 1e-3 if overfit_single_sample else 1.5e-4)
+    weight_decay = config.get(
+        "weight_decay", 0.0 if overfit_single_sample else 0.05
+    )
+    epochs = config.get("epochs", 500 if overfit_single_sample else 200)
+    warmup_epochs = config.get("warmup_epochs", 5 if overfit_single_sample else 20)
     batch_size = config.get("batch_size", 2)
     # Preloaded data lives in shared RAM — workers would only add respawn
     # latency at every epoch boundary, so default to 0 in that case.
@@ -192,6 +198,9 @@ def train(config: dict | None = None) -> dict:
         "decoder_heads": config.get("decoder_heads", 8),
         "dim_feedforward": config.get("dim_feedforward", 1024),
         "mask_ratio": mask_ratio,
+        # "linear": expressive per-patch head that can reconstruct the axial
+        # carrier (default); "conv": band-limited transpose-conv head.
+        "recon_head": config.get("recon_head", "linear"),
     }
     model = SignalMAE(**model_config).to(device)
 
@@ -371,20 +380,29 @@ def train(config: dict | None = None) -> dict:
         # ------------------------------------------------------------------
         # Validation
         # ------------------------------------------------------------------
-        model.eval()
-        val_loss = torch.zeros((), device=device)
-        val_batches = 0
+        # In overfit mode the val loader wraps the exact same frame as train, so
+        # a separate val pass would just recompute train loss at ~2x the cost —
+        # skip it and report the train loss as val for a continuous curve.
+        if overfit_single_sample:
+            avg_val_loss = avg_train_loss
+            val_batches = 0  # nothing to checkpoint on in a memorization run
+        else:
+            model.eval()
+            val_loss = torch.zeros((), device=device)
+            val_batches = 0
 
-        with torch.no_grad():
-            for batch in val_loader:
-                x = batch.to(device, non_blocking=True)
-                with torch.autocast(device_type=device_type, enabled=use_amp):
-                    pred, target, mask = model(x, pos_embed)
-                    loss = calculate_loss(pred, target, mask, **loss_kwargs)
-                val_loss += loss.detach()
-                val_batches += 1
+            with torch.no_grad():
+                for batch in val_loader:
+                    x = batch.to(device, non_blocking=True)
+                    with torch.autocast(device_type=device_type, enabled=use_amp):
+                        pred, target, mask = model(x, pos_embed)
+                        loss = calculate_loss(pred, target, mask, **loss_kwargs)
+                    val_loss += loss.detach()
+                    val_batches += 1
 
-        avg_val_loss = (val_loss / val_batches).item() if val_batches else float("nan")
+            avg_val_loss = (
+                (val_loss / val_batches).item() if val_batches else float("nan")
+            )
 
         print(
             f"Epoch {epoch:3d}  |  "
@@ -453,6 +471,14 @@ def _cli() -> dict:
     parser.add_argument("--warmup-epochs", type=int, dest="warmup_epochs")
     parser.add_argument("--batch-size", type=int, dest="batch_size")
     parser.add_argument("--lr", type=float)
+    parser.add_argument("--weight-decay", type=float, dest="weight_decay")
+    parser.add_argument(
+        "--recon-head",
+        choices=["linear", "conv"],
+        dest="recon_head",
+        help="Reconstruction head: 'linear' (default, expressive, reconstructs "
+        "the axial carrier) or 'conv' (band-limited transpose-conv stack).",
+    )
     parser.add_argument("--mask-ratio", type=float, dest="mask_ratio")
     parser.add_argument("--loss-on", choices=["all", "masked"], dest="loss_on")
     parser.add_argument("--depth-window", type=int, dest="depth_window")
@@ -516,16 +542,20 @@ def _cli() -> dict:
         "--overfit-single-sample",
         action="store_true",
         dest="overfit_single_sample",
-        help="Debug flag: train and validate on the exact same single frame "
-        "every epoch, to sanity-check the architecture can memorize it. "
-        "Automatically bumps --epochs to 2000 and stretches --vis-every to "
-        "keep beamform snapshots sparse over the long run, unless you pass "
-        "those flags explicitly. With --hf-repo, also caps --max-frames to 1 "
-        "so only that one frame is downloaded, unless --max-frames is set.",
+        help="Debug flag: train on the exact same single frame every epoch, to "
+        "sanity-check the architecture can memorize it. Switches to "
+        "memorization-tuned defaults (lr 1e-3, weight_decay 0, warmup 5, "
+        "epochs 500), skips the redundant val pass, and stretches --vis-every "
+        "to keep beamform snapshots sparse — all overridable by passing the "
+        "flags explicitly. With --hf-repo, also caps --max-frames to 1 so only "
+        "that one frame is downloaded, unless --max-frames is set.",
     )
     args = vars(parser.parse_args())
 
-    config = {k: v for k, v in args.items() if v not in (None, False)}
+    # Identity checks, not `not in (None, False)`: a numeric 0.0/0 equals False,
+    # so the membership form would silently drop e.g. `--weight-decay 0`. `is`
+    # keeps zeros while still dropping unset (None) and unset store_true (False).
+    config = {k: v for k, v in args.items() if v is not None and v is not False}
     if config.pop("no_wandb", None):
         config["use_wandb"] = False
     if config.pop("no_preload", None):
