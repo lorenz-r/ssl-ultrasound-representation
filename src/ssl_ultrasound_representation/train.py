@@ -218,13 +218,7 @@ def train(config: dict | None = None) -> dict:
         # "linear": flat Linear(patch_dim, embed_dim), no striding/aliasing —
         # for A/B-testing whether that's what caps single-sample overfit loss.
         "patch_embed": config.get("patch_embed", "conv"),
-        # Transformer dropout defaults to PyTorch's 0.1, a regularizer that
-        # actively fights memorization (same category as weight_decay, which
-        # overfit_single_sample already zeroes) — it keeps the forward pass
-        # stochastic even at convergence, so train/loss can never bottom out
-        # at the model's true representational floor. Zero it automatically
-        # in overfit mode; still explicitly overridable.
-        "dropout": config.get("dropout", 0.0 if overfit_single_sample else 0.1),
+        "dropout": config.get("dropout", 0.1),
     }
     model = SignalMAE(**model_config).to(device)
 
@@ -508,9 +502,7 @@ def _cli() -> dict:
     parser.add_argument(
         "--dropout",
         type=float,
-        help="Transformer dropout (encoder + decoder). Defaults to 0.1, or "
-        "0.0 automatically under --overfit-single-sample, since dropout "
-        "fights memorization the same way weight_decay does.",
+        help="Transformer dropout (encoder + decoder). Defaults to 0.1.",
     )
     parser.add_argument(
         "--recon-head",
