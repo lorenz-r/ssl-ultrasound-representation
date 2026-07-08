@@ -64,9 +64,7 @@ class TrainingMonitor:
             try:
                 import wandb
 
-                self.run = wandb.init(
-                    project=project, name=run_name, config=config
-                )
+                self.run = wandb.init(project=project, name=run_name, config=config)
                 self._wandb = wandb
             except Exception as exc:  # offline cluster node, bad key, ...
                 warnings.warn(f"wandb disabled ({exc}); training continues unlogged.")
@@ -184,9 +182,7 @@ class TrainingMonitor:
         for i in range(n):
             for k, v in compute_all_metrics(gt[i], recon[i]).items():
                 sums[k] = sums.get(k, 0.0) + v
-        self.run.log(
-            {f"val/physics/{k}": v / n for k, v in sums.items()}, step=epoch
-        )
+        self.run.log({f"physics/val/{k}": v / n for k, v in sums.items()}, step=epoch)
 
     # ── checkpoints ──────────────────────────────────────────────────────────
     def log_checkpoint(
