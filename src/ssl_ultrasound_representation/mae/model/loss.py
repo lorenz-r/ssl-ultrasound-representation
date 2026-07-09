@@ -185,6 +185,15 @@ def calculate_loss(
             f"loss_type supports at most two '+'-separated terms; got {loss_type!r}"
         )
 
+    # Compute the loss in fp32 even under torch.autocast. `pred` is fp16 there
+    # while `target` (a view of the fp32 input) is fp32, so MSE's `pred - target`
+    # is promoted to fp32 and stays safe — but the amplitude losses square the
+    # raw fp16 `pred` first (`I_p**2`), which overflows fp16 (max 65504) as soon
+    # as a sample exceeds 256. Per-depth RMS normalization lets a bright specular
+    # reflector reach ~sqrt(N), so this produces inf/NaN losses on real data.
+    pred = pred.float()
+    target = target.float()
+
     pp0 = _per_patch(terms[0], pred, target, transducer_window, depth_window)
     l0 = _reduce(pp0, mask, loss_on)
 
