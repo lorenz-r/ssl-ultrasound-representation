@@ -107,6 +107,8 @@ def train(config: dict | None = None) -> dict:
     log_every = config.get("log_every", 10)  # progress-bar sync cadence (steps)
     mask_ratio = config.get("mask_ratio", 0.0)  # 0.0 = plain autoencoder
     loss_on = config.get("loss_on", "all")  # "all" keeps every patch supervised
+    loss_type = config.get("loss_type", "mse")
+    loss_alpha = config.get("loss_alpha", 0.5)  # second-term weight for compound losses
     save_checkpoints = config.get("save_checkpoints", False)
 
     # Monitoring
@@ -186,10 +188,12 @@ def train(config: dict | None = None) -> dict:
         if hf_repo
         else {"local_zip": data_zip, "local_metadata": data_metadata}
     )
+    overfit = config.get("overfit", False)
+    split_ratios = config.get("split_ratios", (1.0, 0.0, 0.0) if overfit else (0.85, 0.15, 0.0))
     splits, meta = build_split_datasets(
         **data_source,
         split_strategy=config.get("split_strategy", "subject"),
-        ratios=config.get("split_ratios", (0.85, 0.15, 0.0)),
+        ratios=split_ratios,
         transform=normalize_frame,
         focal_zone=config.get("focal_zone", 0),
         preload=preload,
@@ -198,6 +202,8 @@ def train(config: dict | None = None) -> dict:
         # preload path to keep peak memory low.
         share_memory=preload and num_workers > 0,
     )
+    if overfit:
+        splits["val"] = splits["train"]
 
     # Persistent workers avoid respawning (and re-reading the first frame) at
     # every epoch boundary; pointless when num_workers == 0.
@@ -232,6 +238,8 @@ def train(config: dict | None = None) -> dict:
             "grad_clip": grad_clip,
             "mask_ratio": mask_ratio,
             "loss_on": loss_on,
+            "loss_type": loss_type,
+            "loss_alpha": loss_alpha,
             "depth_window": depth_window,
             "transducer_window": transducer_window,
             "embed_dim": embed_dim,
@@ -284,7 +292,13 @@ def train(config: dict | None = None) -> dict:
     # Training loop
     # ------------------------------------------------------------------
     # Loss configuration shared by the train/val passes.
-    loss_kwargs = dict(loss_on=loss_on)
+    loss_kwargs = dict(
+        loss_on=loss_on,
+        loss_type=loss_type,
+        alpha=loss_alpha,
+        depth_window=depth_window,
+        transducer_window=transducer_window,
+    )
     best_val_loss = float("inf")
 
     for epoch in range(1, epochs + 1):
@@ -408,7 +422,34 @@ def _cli() -> dict:
     parser.add_argument("--batch-size", type=int, dest="batch_size")
     parser.add_argument("--lr", type=float)
     parser.add_argument("--mask-ratio", type=float, dest="mask_ratio")
+    parser.add_argument(
+        "--overfit",
+        action="store_true",
+        help="Put all data in train and use it as val too — for single-sample "
+        "overfit sanity checks.",
+    )
+    parser.add_argument(
+        "--split-ratios",
+        type=float,
+        nargs=3,
+        dest="split_ratios",
+        metavar=("TRAIN", "VAL", "TEST"),
+        help="Fraction of data for each split (must sum to 1). "
+        "Example: --split-ratios 0.8 0.2 0.0",
+    )
     parser.add_argument("--loss-on", choices=["all", "masked"], dest="loss_on")
+    parser.add_argument(
+        "--loss-type",
+        dest="loss_type",
+        help="Loss function: mse, envelope, log_envelope, phase, spectral, "
+        "or two '+'-joined terms (e.g. 'mse+envelope'). Default: mse.",
+    )
+    parser.add_argument(
+        "--loss-alpha",
+        type=float,
+        dest="loss_alpha",
+        help="Weight of the second term for compound --loss-type (default 0.5).",
+    )
     parser.add_argument("--depth-window", type=int, dest="depth_window")
     parser.add_argument("--transducer-window", type=int, dest="transducer_window")
     parser.add_argument("--embed-dim", type=int, dest="embed_dim")
@@ -475,6 +516,8 @@ def _cli() -> dict:
         config["preload"] = False
     if config.pop("no_amp", None):
         config["amp"] = False
+    if "split_ratios" in config:
+        config["split_ratios"] = tuple(config["split_ratios"])
     return config
 
 
