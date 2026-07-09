@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from ..eval.metrics import compute_all_metrics
 from .beamform import ZoneBeamformer
 
 # wandb caches a copy of every uploaded artifact (each checkpoint is the full
@@ -63,9 +64,7 @@ class TrainingMonitor:
             try:
                 import wandb
 
-                self.run = wandb.init(
-                    project=project, name=run_name, config=config
-                )
+                self.run = wandb.init(project=project, name=run_name, config=config)
                 self._wandb = wandb
             except Exception as exc:  # offline cluster node, bad key, ...
                 warnings.warn(f"wandb disabled ({exc}); training continues unlogged.")
@@ -157,6 +156,33 @@ class TrainingMonitor:
         fig.suptitle(title, fontsize=10)
         fig.tight_layout()
         return fig
+
+    # ── physics metrics ──────────────────────────────────────────────────────
+    def log_physics_metrics(
+        self, epoch: int, model: torch.nn.Module, pos_embed: torch.Tensor, device
+    ) -> None:
+        """Log physics-aware IQ reconstruction metrics (see `eval.metrics`) on
+        the fixed visualisation frames: complex correlation, centre-frequency
+        shift, spectral coherence, SLSC error, coherence-factor error. Unlike
+        `log_reconstructions` this needs no beamform geometry, so it still runs
+        when that's unavailable.
+        """
+        if self.run is None or self._vis_frames is None:
+            return
+
+        model.eval()
+        with torch.no_grad():
+            x = self._vis_frames.to(device)
+            pred, _, _ = model(x, pos_embed)
+            recon = model.unpatchify(pred).cpu().numpy()
+        gt = self._vis_frames.numpy()
+
+        n = gt.shape[0]
+        sums: dict[str, float] = {}
+        for i in range(n):
+            for k, v in compute_all_metrics(gt[i], recon[i]).items():
+                sums[k] = sums.get(k, 0.0) + v
+        self.run.log({f"physics/val/{k}": v / n for k, v in sums.items()}, step=epoch)
 
     # ── checkpoints ──────────────────────────────────────────────────────────
     def log_checkpoint(
