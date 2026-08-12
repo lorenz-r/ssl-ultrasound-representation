@@ -10,7 +10,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ssl_ultrasound_representation.mae.model.us_mae import SignalMAE
+from ssl_ultrasound_representation.mae.model.us_mae import MASK_MODES, SignalMAE
 from ssl_ultrasound_representation.mae.model.loss import calculate_loss
 from ssl_ultrasound_representation.mae.model.pos_encoding import (
     build_grid_positional_encoding,
@@ -106,6 +106,11 @@ def train(config: dict | None = None) -> dict:
         print(f"GPU: {name} (sm_{cap})  |  AMP: {use_amp}")
     log_every = config.get("log_every", 10)  # progress-bar sync cadence (steps)
     mask_ratio = config.get("mask_ratio", 0.0)  # 0.0 = plain autoencoder
+    # "random" = a fresh mask per sample/step; "fixed"/"stride"/"block" hide the
+    # same tokens every step, which takes mask sampling out of the picture when
+    # debugging (e.g. an --overfit run that refuses to fit a single sample).
+    mask_mode = config.get("mask_mode", "random")
+    mask_seed = config.get("mask_seed", 0)
     loss_on = config.get("loss_on", "all")  # "all" keeps every patch supervised
     loss_type = config.get("loss_type", "mse")
     loss_alpha = config.get("loss_alpha", 0.5)  # second-term weight for compound losses
@@ -161,6 +166,8 @@ def train(config: dict | None = None) -> dict:
         "decoder_heads": config.get("decoder_heads", 8),
         "dim_feedforward": config.get("dim_feedforward", 1024),
         "mask_ratio": mask_ratio,
+        "mask_mode": mask_mode,
+        "mask_seed": mask_seed,
     }
     model = SignalMAE(**model_config).to(device)
 
@@ -237,6 +244,7 @@ def train(config: dict | None = None) -> dict:
             "batch_size": batch_size,
             "grad_clip": grad_clip,
             "mask_ratio": mask_ratio,
+            "mask_mode": mask_mode,
             "loss_on": loss_on,
             "loss_type": loss_type,
             "loss_alpha": loss_alpha,
@@ -421,6 +429,21 @@ def _cli() -> dict:
     parser.add_argument("--batch-size", type=int, dest="batch_size")
     parser.add_argument("--lr", type=float)
     parser.add_argument("--mask-ratio", type=float, dest="mask_ratio")
+    parser.add_argument(
+        "--mask-mode",
+        choices=MASK_MODES,
+        dest="mask_mode",
+        help="How masked tokens are picked. 'random' (default) resamples per "
+        "sample and per step; 'fixed' (seeded random), 'stride' (evenly "
+        "spaced) and 'block' (contiguous tail) hide the same tokens every "
+        "step — use these for overfit/debug runs.",
+    )
+    parser.add_argument(
+        "--mask-seed",
+        type=int,
+        dest="mask_seed",
+        help="Seed for --mask-mode fixed (default 0).",
+    )
     parser.add_argument(
         "--overfit",
         action="store_true",
