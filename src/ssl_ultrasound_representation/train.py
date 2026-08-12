@@ -404,6 +404,7 @@ def train(config: dict | None = None) -> dict:
         )
         if epoch == 1 or epoch % vis_every == 0 or epoch == epochs:
             monitor.log_reconstructions(epoch, model, pos_embed, device)
+            monitor.log_physics_metrics(epoch, model, pos_embed, device)
 
         # ------------------------------------------------------------------
         # Checkpoint
