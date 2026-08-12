@@ -61,6 +61,31 @@ def _amp_beneficial(device: str) -> bool:
     return torch.cuda.get_device_capability()[0] >= 7
 
 
+def param_groups(model: torch.nn.Module, weight_decay: float) -> list[dict]:
+    """Split parameters into decayed / non-decayed groups (standard MAE recipe).
+
+    Weight decay belongs on the weight matrices only. Applying it to biases,
+    LayerNorm gains, `mask_token` and `decoder_pos_embed` just shrinks them
+    toward zero — and those last two are the per-token capacity a masked token
+    reconstructs from, so decaying them works directly against what the model
+    is being asked to learn.
+    """
+    decay, no_decay = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        # ndim <= 1 catches every bias and LayerNorm gain; the two embeddings
+        # are higher-rank, so they need naming.
+        if p.ndim <= 1 or name.endswith(("pos_embed", "mask_token")):
+            no_decay.append(p)
+        else:
+            decay.append(p)
+    return [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+
+
 def train(config: dict | None = None) -> dict:
     if config is None:
         config = {}
@@ -278,7 +303,7 @@ def train(config: dict | None = None) -> dict:
     # ------------------------------------------------------------------
     # Optimiser + LR schedule (linear warmup -> cosine decay, per step)
     # ------------------------------------------------------------------
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = AdamW(param_groups(model, weight_decay), lr=lr)
     scaler = torch.amp.GradScaler(device_type, enabled=use_amp)
 
     steps_per_epoch = max(len(train_loader), 1)
@@ -531,7 +556,10 @@ def _cli() -> dict:
     )
     args = vars(parser.parse_args())
 
-    config = {k: v for k, v in args.items() if v not in (None, False)}
+    # Identity checks, not `v not in (None, False)`: 0 == False in Python, so a
+    # value test silently drops every explicitly-passed zero (--warmup-epochs 0,
+    # --mask-ratio 0, --focal-zone 0) and falls back to the default instead.
+    config = {k: v for k, v in args.items() if v is not None and v is not False}
     if config.pop("no_wandb", None):
         config["use_wandb"] = False
     if config.pop("no_preload", None):

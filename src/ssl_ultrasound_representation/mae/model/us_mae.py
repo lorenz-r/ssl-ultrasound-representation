@@ -102,6 +102,13 @@ class SignalMAE(nn.Module):
         self._feat_chw = tuple(feat.shape[1:])  # (C, H, W) at the bottleneck
         self._conv_sizes = sizes  # [(tw, w), s1, s2, s3]
         self.patch_proj = nn.Linear(feat.flatten(1).shape[1], embed_dim)
+        # Normalize the patch embedding before the positional encoding is added.
+        # Without it the conv+Linear stack emits tokens with std ~0.02 at init
+        # while the sinusoidal encoding sits at ~0.55, so the encoder input is
+        # ~97% position and ~3% content: the model has to spend its first
+        # hundreds of steps just learning to amplify patch_proj before patch
+        # content influences anything. LayerNorm puts both at unit scale.
+        self.patch_norm = nn.LayerNorm(embed_dim)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
@@ -183,7 +190,9 @@ class SignalMAE(nn.Module):
         tok = self.patch_conv(
             patches.reshape(B * L, 2, self.transducer_window, self.depth_window)
         )
-        tok = self.patch_proj(tok.flatten(1)).view(B, L, self.embed_dim)
+        tok = self.patch_norm(self.patch_proj(tok.flatten(1))).view(
+            B, L, self.embed_dim
+        )
         tok = tok + pos_embed.unsqueeze(0).to(tok.dtype)
 
         # --- 2. Masking over the token grid (random or deterministic) ---
@@ -238,7 +247,9 @@ class SignalMAE(nn.Module):
         tok = self.patch_conv(
             patches.reshape(B * L, 2, self.transducer_window, self.depth_window)
         )
-        tok = self.patch_proj(tok.flatten(1)).view(B, L, self.embed_dim)
+        tok = self.patch_norm(self.patch_proj(tok.flatten(1))).view(
+            B, L, self.embed_dim
+        )
         tok = tok + pos_embed.unsqueeze(0).to(tok.dtype)
         z = self.encoder_norm(self.encoder(tok))  # (B, L, embed_dim)
         if pool == "mean":
