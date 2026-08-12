@@ -11,7 +11,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from ssl_ultrasound_representation.mae.model.us_mae import MASK_MODES, SignalMAE
-from ssl_ultrasound_representation.mae.model.loss import calculate_loss
+from ssl_ultrasound_representation.mae.model.loss import (
+    LOSS_TYPES,
+    calculate_loss,
+    compute_metrics,
+)
 from ssl_ultrasound_representation.mae.model.pos_encoding import (
     build_grid_positional_encoding,
 )
@@ -139,6 +143,15 @@ def train(config: dict | None = None) -> dict:
     loss_on = config.get("loss_on", "all")  # "all" keeps every patch supervised
     loss_type = config.get("loss_type", "mse")
     loss_alpha = config.get("loss_alpha", 0.5)  # second-term weight for compound losses
+    # Loss-family metrics logged every epoch beside the optimised loss (see
+    # `compute_metrics`). Envelope is the one to watch: B-mode is |IQ|, so it
+    # tracks image quality, while raw IQ mse also charges for unpredictable
+    # speckle phase. Distinct from the `physics/*` metrics, which run on whole
+    # frames every `vis_every` epochs.
+    metrics = tuple(config.get("metrics", ("mse", "envelope")))
+    unknown = [m for m in metrics if m not in LOSS_TYPES]
+    if unknown:
+        raise ValueError(f"unknown metric(s) {unknown}; valid: {LOSS_TYPES}")
     save_checkpoints = config.get("save_checkpoints", False)
 
     # Monitoring
@@ -273,6 +286,7 @@ def train(config: dict | None = None) -> dict:
             "loss_on": loss_on,
             "loss_type": loss_type,
             "loss_alpha": loss_alpha,
+            "metrics": list(metrics),
             "depth_window": depth_window,
             "transducer_window": transducer_window,
             "embed_dim": embed_dim,
@@ -340,6 +354,7 @@ def train(config: dict | None = None) -> dict:
         # would stall the pipeline on a small, launch-bound model.
         train_loss = torch.zeros((), device=device)
         grad_norm_sum = torch.zeros((), device=device)
+        train_metrics: dict[str, torch.Tensor] = {}
         train_batches = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
@@ -359,6 +374,13 @@ def train(config: dict | None = None) -> dict:
             scaler.update()
             scheduler.step()
 
+            # Monitoring only — no graph, and fp32 inside compute_metrics.
+            with torch.no_grad():
+                for k, v in compute_metrics(
+                    pred, target, mask, metrics, depth_window, transducer_window
+                ).items():
+                    train_metrics[k] = train_metrics.get(k, 0.0) + v
+
             train_loss += loss.detach()
             grad_norm_sum += grad_norm.detach()
             train_batches += 1
@@ -367,12 +389,17 @@ def train(config: dict | None = None) -> dict:
 
         avg_train_loss = (train_loss / max(train_batches, 1)).item()
         avg_grad_norm = (grad_norm_sum / max(train_batches, 1)).item()
+        avg_train_metrics = {
+            f"train/{k}": (v / max(train_batches, 1)).item()
+            for k, v in train_metrics.items()
+        }
 
         # ------------------------------------------------------------------
         # Validation
         # ------------------------------------------------------------------
         model.eval()
         val_loss = torch.zeros((), device=device)
+        val_metrics: dict[str, torch.Tensor] = {}
         val_batches = 0
 
         with torch.no_grad():
@@ -381,16 +408,31 @@ def train(config: dict | None = None) -> dict:
                 with torch.autocast(device_type=device_type, enabled=use_amp):
                     pred, target, mask = model(x, pos_embed)
                     loss = calculate_loss(pred, target, mask, **loss_kwargs)
+                for k, v in compute_metrics(
+                    pred, target, mask, metrics, depth_window, transducer_window
+                ).items():
+                    val_metrics[k] = val_metrics.get(k, 0.0) + v
                 val_loss += loss.detach()
                 val_batches += 1
 
         avg_val_loss = (val_loss / val_batches).item() if val_batches else float("nan")
+        avg_val_metrics = {
+            f"val/{k}": (v / val_batches).item() for k, v in val_metrics.items()
+        }
 
+        # Console shows the masked-patch metrics — what the MAE is actually
+        # asked to predict; the "_all" variants go to wandb.
+        metric_str = "".join(
+            f"  |  {k}: {avg_val_metrics[f'val/{k}_masked']:.6f}"
+            for k in metrics
+            if f"val/{k}_masked" in avg_val_metrics
+        )
         print(
             f"Epoch {epoch:3d}  |  "
             f"train loss: {avg_train_loss:.6f}  |  "
             f"val loss:   {avg_val_loss:.6f}  |  "
             f"lr: {scheduler.get_last_lr()[0]:.2e}"
+            f"{metric_str}"
         )
 
         monitor.log_epoch(
@@ -400,6 +442,8 @@ def train(config: dict | None = None) -> dict:
                 "val/loss": avg_val_loss,
                 "train/lr": scheduler.get_last_lr()[0],
                 "train/grad_norm": avg_grad_norm,
+                **avg_train_metrics,
+                **avg_val_metrics,
             },
         )
         if epoch == 1 or epoch % vis_every == 0 or epoch == epochs:
@@ -497,6 +541,14 @@ def _cli() -> dict:
         type=float,
         dest="loss_alpha",
         help="Weight of the second term for compound --loss-type (default 0.5).",
+    )
+    parser.add_argument(
+        "--metrics",
+        nargs="+",
+        choices=LOSS_TYPES,
+        help="Extra reconstruction metrics logged every epoch (not optimised). "
+        "Each is logged over the masked patches and over all patches: "
+        "train/<name>_masked, val/<name>_all, etc. Default: mse envelope.",
     )
     parser.add_argument("--depth-window", type=int, dest="depth_window")
     parser.add_argument("--transducer-window", type=int, dest="transducer_window")

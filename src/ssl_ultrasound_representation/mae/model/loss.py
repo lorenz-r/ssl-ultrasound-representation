@@ -148,6 +148,44 @@ def _per_patch(
 # ---------------------------------------------------------------------------
 
 
+def compute_metrics(
+    pred,
+    target,
+    mask,
+    names: "list[str] | tuple[str, ...]",
+    depth_window: int | None = None,
+    transducer_window: int | None = None,
+) -> dict[str, torch.Tensor]:
+    """Diagnostic reconstruction metrics — for monitoring, not optimisation.
+
+    Each name in `names` is evaluated twice: reduced over the masked patches
+    ("<name>_masked", what the MAE is actually asked to predict) and over every
+    patch ("<name>_all", which also includes the visible tokens). Tracking both
+    matters because with `loss_on="masked"` the visible tokens receive no
+    gradient at all, so a full-frame reconstruction can look far worse than the
+    optimised loss suggests — and with a frozen `mask_mode` that gap never
+    closes.
+
+    Watching "envelope" beside "mse" is the main point: B-mode displays
+    √(I²+Q²), so envelope error tracks image quality, whereas raw IQ mse also
+    charges for speckle phase that is not predictable from context.
+
+    Complements `eval.metrics` (physics/imaging fidelity on whole frames);
+    this is the loss-family breakdown, in patch space, on every batch.
+
+    Returns a dict of detached 0-d tensors, ready to accumulate on-device.
+    """
+    pred = pred.float()
+    target = target.float()
+    out: dict[str, torch.Tensor] = {}
+    for name in names:
+        # Per-patch is the expensive part — compute once, reduce twice.
+        pp = _per_patch(name, pred, target, transducer_window, depth_window)
+        out[f"{name}_all"] = _reduce(pp, mask, "all").detach()
+        out[f"{name}_masked"] = _reduce(pp, mask, "masked").detach()
+    return out
+
+
 def calculate_loss(
     pred,
     target,
