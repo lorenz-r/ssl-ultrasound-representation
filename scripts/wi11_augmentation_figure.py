@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from ssl_us.data import augment as aug
+from ssl_us.data import transforms as tf
 
 NZ, NX, K = 64, 64, 16
 
@@ -47,24 +48,38 @@ def to_bmode_db(view_k1_or_more: np.ndarray) -> np.ndarray:
 
 
 def main(out_path: str = "figures/wi11_augmentations.png") -> Path:
-    sums, occupancy = synthetic_crop()
-    rng_b = np.random.default_rng(1)
-    rng_a = np.random.default_rng(2)
+    import torch
+
+    sums_np, occupancy_np = synthetic_crop()
+    # The policies are batched torch ops (they run on the GPU during training);
+    # here a batch of 8 produces the 8 views in one call, on CPU.
+    n_views = 8
+    sums = torch.from_numpy(sums_np).unsqueeze(0).repeat(n_views, 1, 1, 1, 1)
+    occupancy = torch.from_numpy(occupancy_np.astype("float32")).unsqueeze(0).repeat(
+        n_views, 1, 1, 1
+    )
+    gen_b, gen_a = torch.Generator(), torch.Generator()
+    gen_b.manual_seed(1)
+    gen_a.manual_seed(2)
+
+    views_b = aug.policy_b(tf.reduce_and_normalize_torch(sums, occupancy, target_k=1), gen_b)
+    # expand_to=16 keeps the whole ladder available, so the drawn K actually
+    # varies across views — the point of the Policy A panel. to_bmode_db
+    # sums over the sector axis for display.
+    views_a, ks = aug.policy_a(sums, occupancy, gen_a, expand_to=16)
 
     fig, axes = plt.subplots(2, 8, figsize=(20, 5.5))
     axes[0, 0].set_ylabel("Policy B\n(geometry-only)", fontsize=10)
     axes[1, 0].set_ylabel("Policy A\n(anatomy-focused)", fontsize=10)
 
-    for i in range(8):
-        view_b = aug.policy_b(sums, rng_b, z_axis=1, x_axis=2)
-        axes[0, i].imshow(to_bmode_db(view_b), cmap="gray", vmin=-40, vmax=0)
+    for i in range(n_views):
+        axes[0, i].imshow(to_bmode_db(views_b[i].numpy()), cmap="gray", vmin=-40, vmax=0)
         axes[0, i].set_title(f"view {i}", fontsize=8)
         axes[0, i].set_xticks([])
         axes[0, i].set_yticks([])
 
-        view_a, k = aug.policy_a(sums, occupancy, rng_a, z_axis=1)
-        axes[1, i].imshow(to_bmode_db(view_a), cmap="gray", vmin=-40, vmax=0)
-        axes[1, i].set_title(f"K={k}", fontsize=8)
+        axes[1, i].imshow(to_bmode_db(views_a[i].numpy()), cmap="gray", vmin=-40, vmax=0)
+        axes[1, i].set_title(f"K={int(ks[i])}", fontsize=8)
         axes[1, i].set_xticks([])
         axes[1, i].set_yticks([])
 

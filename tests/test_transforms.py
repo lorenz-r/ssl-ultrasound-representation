@@ -147,3 +147,44 @@ def test_empty_sectors_round_trip_through_reduce_and_normalize_without_nan():
     for k in (16, 8, 4, 2, 1):
         out = tf.reduce_and_normalize(sums, geom.occupancy, target_k=k, mode="mean")
         assert np.all(np.isfinite(out)), f"NaN/inf at K={k}"
+
+
+# ── numpy / torch equivalence ────────────────────────────────────────────────
+
+
+def test_torch_ladder_matches_numpy_at_every_level():
+    """`reduce_and_normalize_torch` exists so the GPU training path avoids a
+    device round-trip, which makes it a second implementation of a rule that
+    must not drift. This is the guard: the NumPy version (used by the store's
+    read path) and the torch version must agree at every rung of the ladder.
+    """
+    import torch
+
+    rng = np.random.default_rng(0)
+    sums = rng.normal(size=(3, 2, 8, 9, 16)).astype(np.float32)
+    occ = rng.integers(0, 10, size=(3, 8, 9, 16)).astype(np.float32)
+    for k in (16, 8, 4, 2, 1):
+        want = tf.reduce_and_normalize(sums, occ[:, None], target_k=k, axis=-1)
+        got = tf.reduce_and_normalize_torch(
+            torch.from_numpy(sums), torch.from_numpy(occ), target_k=k
+        ).numpy()
+        np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6)
+
+
+def test_torch_ladder_zeroes_empty_sectors_like_numpy():
+    """0/0 must be exactly 0, not NaN — an empty sector had nothing summed in."""
+    import torch
+
+    sums = np.zeros((1, 2, 2, 2, 4), dtype=np.float32)
+    occ = np.zeros((1, 2, 2, 4), dtype=np.float32)
+    got = tf.reduce_and_normalize_torch(
+        torch.from_numpy(sums), torch.from_numpy(occ), target_k=2
+    ).numpy()
+    assert np.isfinite(got).all() and not got.any()
+
+
+def test_torch_ladder_rejects_a_non_dividing_target():
+    import torch
+
+    with pytest.raises(ValueError, match="must divide"):
+        tf.reduce_and_normalize_torch(torch.zeros(1, 2, 2, 2, 16), torch.zeros(1, 2, 2, 16), 3)

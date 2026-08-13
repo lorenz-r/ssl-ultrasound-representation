@@ -24,9 +24,17 @@ Two distinct jobs, and the second is the one that is easy to miss:
 Memory is `cache_frames × 29.6 MB` per worker (≈1.9 GB at the default 64), so
 worker count and cache size trade off against host RAM — see `LoaderConfig`.
 
-**Read order is load-bearing.** Everything downstream goes through
-:func:`ssl_us.data.transforms.reduce_and_normalize`: reduce the K-ladder by
-pairwise sums *then* divide by occupancy, never the reverse (PLAN.md §3.2 /
+**Augmentation is not done here — it runs on the GPU.** The loader yields
+*raw* crops and :class:`GpuAugmentor` turns each batch into a VICReg view
+pair. Profiling the earlier CPU-side version on the cluster's 4-core instances
+put ~59% of loader time in Gaussian noise generation and ~20% in the K-ladder,
+capping throughput at ~157 pairs/s against the ~650 the training budget needs;
+the same policies on the (otherwise idle) GPU reach ~895 pairs/s. See
+:mod:`ssl_us.data.augment`, which is the single implementation of both
+policies.
+
+**Read order is load-bearing.** Everything downstream reduces the K-ladder by
+pairwise sums *then* divides by occupancy, never the reverse (PLAN.md §3.2 /
 WI-5). Policy A augments the **raw** sums before that reduction, which is why
 the loader hands it raw crops and lets the policy do the reduction itself.
 """
@@ -65,8 +73,10 @@ class LoaderConfig:
     cache_frames: int = 64
     seed: int = 0
     frame_ids: list[str] | None = None  # restrict to a split (WI-10)
-    # How Policy A's random K-reduction is reconciled with the encoder's fixed
-    # 2K input channels — see `sector_channel_mode` in the module notes.
+    # Policy A's random K-reduction vs the encoder's fixed 2K input width: with
+    # jitter on, each sample draws a level at or below the arm's K and the
+    # surviving sectors are repeated back up to K (repeating, not zero-padding,
+    # so `k` cannot be read off the zero channels). Off pins it to the arm's K.
     k_jitter: bool = True
     policy_a_config: aug.PolicyAConfig | None = None
     policy_b_config: aug.PolicyBConfig | None = None
@@ -87,36 +97,6 @@ class LoaderConfig:
     def in_channels(self) -> int:
         """Encoder input channels: I/Q × K sectors (`Conv2d(2K, 64, 7, 2, 3)`)."""
         return 2 * self.k
-
-
-def to_model_input(view: np.ndarray) -> np.ndarray:
-    """``(2, H, W, k) -> (2k, H, W)``, I-block then Q-block.
-
-    Channel order is `[I_0..I_{k-1}, Q_0..Q_{k-1}]`. Stated because the stem is
-    a plain `Conv2d(2K, ...)` that cannot tell you what its channels mean, and
-    any transfer or probe code slicing channels has to agree with this.
-    """
-    return np.ascontiguousarray(np.moveaxis(view, -1, 1).reshape(-1, *view.shape[1:3]))
-
-
-def match_sector_channels(view: np.ndarray, k_target: int) -> np.ndarray:
-    """Expand a k-sector view back to ``k_target`` channels by repeating sectors.
-
-    Policy A's *primary* augmentation is a random K-reduction (PLAN.md WI-11),
-    but the encoder's input width is fixed at 2K for the arm. Repeating each
-    surviving sector `k_target/k` times keeps the tensor shape constant while
-    preserving what the augmentation actually did — destroy angular resolution.
-
-    Zero-padding was rejected: which channels are zero would encode `k`
-    exactly, handing the model a trivial shortcut to identify the augmentation
-    rather than be invariant to it.
-    """
-    k = view.shape[-1]
-    if k == k_target:
-        return view
-    if k_target % k:
-        raise ValueError(f"cannot expand k={k} to k_target={k_target}: not a multiple")
-    return np.repeat(view, k_target // k, axis=-1)
 
 
 class FrameCache:
@@ -167,12 +147,13 @@ class FrameCache:
 
 
 class SectorCropDataset:
-    """Iterable of ``(view1, view2)`` crop pairs for VICReg (WI-12).
+    """Iterable of raw ``(sums, occupancy)`` crops from the store (WI-12).
 
-    Yields NumPy arrays of shape ``(2K, crop, crop)``; the training script wraps
-    them in tensors. Implemented as a plain iterable rather than a torch
-    `IterableDataset` so it stays importable and testable without torch, and so
-    the worker-sharding logic is explicit (`shard`/`num_shards`).
+    Yields NumPy arrays — ``(2, crop, crop, 16)`` raw sector sums and the
+    matching ``(crop, crop, 16)`` occupancy — for :class:`GpuAugmentor` to turn
+    into view pairs. Implemented as a plain iterable rather than a torch
+    `IterableDataset` so the worker-sharding logic stays explicit
+    (`shard`/`num_shards`) and testable on its own.
     """
 
     def __init__(self, config: LoaderConfig):
@@ -185,7 +166,6 @@ class SectorCropDataset:
         if missing:
             raise KeyError(f"{len(missing)} frame ids are not in the store, e.g. {missing[:3]}")
         self.indices = [known[f] for f in ids]
-        self._z_axis, self._x_axis = 1, 2  # within a (2, H, W, k) crop
 
     # ── crop geometry ───────────────────────────────────────────────────────
 
@@ -205,40 +185,22 @@ class SectorCropDataset:
         x0 = int(rng.integers(0, geo.BMODE_NX - size + 1))
         return z0, x0
 
-    def _view(self, frame: np.ndarray, z0: int, x0: int, rng: np.random.Generator) -> np.ndarray:
-        """One augmented view from a raw frame, as ``(2K, H, W)``."""
-        cfg = self.cfg
-        s = cfg.crop_size
-        # Crop FIRST, augment second: Policy A's chain is O(crop), not O(frame).
-        sums = frame[:, z0 : z0 + s, x0 : x0 + s, :]
-        occ = self.occupancy[z0 : z0 + s, x0 : x0 + s, :]
-
-        if cfg.policy.upper() == "A":
-            acfg = cfg.policy_a_config or aug.PolicyAConfig(
-                # Without jitter the K-reduction is pinned to the arm's K, so
-                # the channel count is constant by construction.
-                k_choices=tuple(c for c in (16, 8, 4, 2, 1) if c <= cfg.k) if cfg.k_jitter
-                else (cfg.k,)
-            )
-            view, _k = aug.policy_a(sums, occ, rng, z_axis=self._z_axis, config=acfg)
-            view = match_sector_channels(view, cfg.k)
-        else:
-            # Policy B is geometry-only: reduce/normalize to the arm's K first,
-            # then apply flips/jitter to the finished crop.
-            view = tf.reduce_and_normalize(sums, occ[None], target_k=cfg.k, axis=-1)
-            view = aug.policy_b(
-                view,
-                rng,
-                z_axis=self._z_axis,
-                x_axis=self._x_axis,
-                config=cfg.policy_b_config,
-            )
-        return to_model_input(view.astype(np.float32, copy=False))
-
     # ── iteration ───────────────────────────────────────────────────────────
 
     def iter_epoch(self, epoch: int = 0, shard: int = 0, num_shards: int = 1):
-        """Yield ``(view1, view2)`` for one epoch of this shard's frames."""
+        """Yield ``(raw_crop, occupancy_crop)`` for one epoch of this shard.
+
+        **Raw, not augmented.** Augmentation is batched onto the GPU
+        (:class:`GpuAugmentor`), so the CPU side does only the part that has to
+        happen here — decompress a frame and slice a window out of it. That is
+        the whole point of the split: on the cluster's 4-core instances,
+        CPU-side augmentation capped throughput at ~157 pairs/s against the
+        ~650 the training budget needs.
+
+        The occupancy crop rides along rather than being re-derived on the GPU
+        because it depends only on the crop's ``(z0, x0)``, and shipping it is
+        simpler than gathering 923 frames' worth of geometry device-side.
+        """
         cfg = self.cfg
         # Distinct stream per (seed, epoch, shard): workers must not draw the
         # same crops, and epochs must not repeat the same ones.
@@ -246,13 +208,19 @@ class SectorCropDataset:
         mine = self.indices[shard::num_shards]
         if not mine:
             return
+        s = cfg.crop_size
         cache = FrameCache(self.store, mine, cfg, rng)
         while not cache.empty():
             _idx, frame = cache.draw()
             z0, x0 = self._sample_origin(rng)
-            # Both views share the crop location — VICReg's positive pair is
-            # two augmentations of the SAME region, not two regions.
-            yield self._view(frame, z0, x0, rng), self._view(frame, z0, x0, rng)
+            # np.ascontiguousarray so the worker ships a compact buffer rather
+            # than a strided view of the whole 29.6 MB frame.
+            yield (
+                np.ascontiguousarray(frame[:, z0 : z0 + s, x0 : x0 + s, :]),
+                np.ascontiguousarray(self.occupancy[z0 : z0 + s, x0 : x0 + s, :].astype(
+                    np.float32, copy=False
+                )),
+            )
 
     def __iter__(self):
         return self.iter_epoch()
@@ -263,25 +231,82 @@ class SectorCropDataset:
 
 
 # ── torch integration ───────────────────────────────────────────────────────
-#
-# Kept at the bottom and imported lazily so the module above stays usable (and
-# testable) without torch — the beamforming venv has no torch installed.
+
+
+class GpuAugmentor:
+    """Turns a batch of raw crops into a VICReg view pair, on the GPU.
+
+    Both views come from the *same* raw crop with independent draws — a VICReg
+    positive pair is two augmentations of one region, not two regions — and
+    the whole batch is augmented in a handful of kernels rather than per crop
+    on the CPU.
+
+    Usage wraps a raw loader and preserves `train_vicreg`'s contract (any
+    iterable of ``(view1, view2)`` tensor batches)::
+
+        loader = make_dataloader(cfg, batch_size=256)
+        for x1, x2 in GpuAugmentor(cfg, device="cuda").wrap(loader):
+            ...
+    """
+
+    def __init__(self, config: LoaderConfig, device: str = "cuda", seed: int | None = None):
+        import torch
+
+        self.cfg = config
+        self.device = torch.device(device)
+        self.generator = torch.Generator(device=self.device)
+        self.generator.manual_seed(config.seed if seed is None else seed)
+        if config.policy.upper() == "A":
+            # Without jitter the K-reduction is pinned to the arm's K, so the
+            # channel count is constant by construction.
+            self._acfg = config.policy_a_config or aug.PolicyAConfig(
+                k_choices=(
+                    tuple(c for c in (16, 8, 4, 2, 1) if c <= config.k)
+                    if config.k_jitter
+                    else (config.k,)
+                )
+            )
+
+    def __call__(self, sums, occ) -> tuple:
+        """``(B,2,Z,X,16), (B,Z,X,16) -> two ``(B, 2K, Z, X)`` view batches."""
+        import torch
+
+        sums = sums.to(self.device, non_blocking=True)
+        occ = occ.to(self.device, non_blocking=True)
+        views = []
+        for _ in range(2):
+            if self.cfg.policy.upper() == "A":
+                v, _k = aug.policy_a(
+                    sums, occ, self.generator, config=self._acfg, expand_to=self.cfg.k
+                )
+            else:
+                v = tf.reduce_and_normalize_torch(sums, occ, target_k=self.cfg.k)
+                v = aug.policy_b(v, self.generator, config=self.cfg.policy_b_config)
+            # (B, 2, Z, X, k) -> (B, 2k, Z, X), I-block then Q-block.
+            views.append(torch.movedim(v, -1, 2).flatten(1, 2).contiguous())
+        return views[0], views[1]
+
+    def wrap(self, loader):
+        """Yield augmented ``(view1, view2)`` batches from a raw loader."""
+        for sums, occ in loader:
+            yield self(sums, occ)
 
 
 def make_dataloader(
     config: LoaderConfig,
     batch_size: int = 256,
-    num_workers: int = 8,
+    num_workers: int = 4,
     pin_memory: bool = True,
     prefetch_factor: int = 4,
 ):
-    """A torch ``DataLoader`` of ``(view1, view2)`` batches, sharded across workers.
+    """A torch ``DataLoader`` of **raw** ``(sums, occupancy)`` crop batches.
 
-    Each worker gets a disjoint slice of frames and its own RNG stream, so no
-    two workers decompress the same frame or emit the same crops. The epoch
-    counter is bumped in the *parent* before workers are forked, so every epoch
-    reshuffles frame order and crop positions rather than replaying epoch 0 —
-    with an `IterableDataset` that does not happen for free.
+    Feed it through :class:`GpuAugmentor` to get view pairs. Each worker gets a
+    disjoint slice of frames and its own RNG stream, so no two workers
+    decompress the same frame or emit the same crops. The epoch counter is
+    bumped in the *parent* before workers are forked, so every epoch reshuffles
+    frame order and crop positions rather than replaying epoch 0 — with an
+    `IterableDataset` that does not happen for free.
 
     `num_workers` trades throughput against host RAM: each worker holds
     `cache_frames` decompressed frames (~29.6 MB each).
@@ -299,8 +324,8 @@ def make_dataloader(
         def __iter__(self):
             info = get_worker_info()
             shard, num_shards = (info.id, info.num_workers) if info else (0, 1)
-            for v1, v2 in dataset.iter_epoch(self.epoch, shard, num_shards):
-                yield torch.from_numpy(v1), torch.from_numpy(v2)
+            for sums, occ in dataset.iter_epoch(self.epoch, shard, num_shards):
+                yield torch.from_numpy(sums), torch.from_numpy(occ)
 
     class _EpochDataLoader(DataLoader):
         def __iter__(self):

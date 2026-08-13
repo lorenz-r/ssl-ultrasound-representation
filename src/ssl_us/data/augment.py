@@ -1,13 +1,32 @@
 """Augmentation policies A (anatomy-focused) and B (geometry-only), PLAN.md
-§3.2b / WI-11.
+§3.2b / WI-11 — **batched, on whatever device the tensors live on**.
 
-**Axis convention.** Every function here takes explicit ``z_axis``/``x_axis``
-(and, where relevant, a trailing sector axis) rather than assuming a fixed
-array rank, because the two call sites use different layouts: the bootstrap
-harness's plain ``(size, size)`` bmode crops (PLAN.md 4.6) have no channel or
-sector axis, while the real sector-sum store is ``(2, Z, X, K)`` per frame
-(PLAN.md §3.7). Hardcoding one layout would silently do the wrong thing on
-the other.
+This is torch rather than NumPy, and batched rather than per-crop, for a
+measured reason. With the loader doing augmentation on the CPU, profiling on
+the cluster's 4-core instances put ~59% of loader time in drawing Gaussian
+noise and ~20% in the K-ladder reduction, capping throughput at ~157 crop
+pairs/s against the ~650 PLAN.md §5.4's training budget needs. Every operation
+here is elementwise or a grouped reduction — exactly what the (otherwise idle)
+GPU does well — so the policies moved to the GPU and the loader was left doing
+only decompress-and-slice. There is deliberately **one** implementation: a
+NumPy copy kept "for tests" would be a second definition of the semantics,
+free to drift from the one that actually trains the model.
+
+Everything runs on CPU tensors too (torch is a core dependency and needs no
+GPU for that), so tests and figures do not require a GPU.
+
+**Axis convention.** Fixed and canonical, unlike the earlier per-call
+``z_axis``/``x_axis`` arguments: raw sector sums are ``(B, 2, Z, X, K)`` and
+occupancy is ``(B, Z, X, K)``, matching the store's own ``(2, Z, X, K)`` frame
+layout (PLAN.md §3.7) with a batch axis in front. The old explicit-axis
+signatures existed to serve a second, rank-3 call site; that site is gone, and
+a fixed layout removes a class of silent transposition bugs.
+
+**Randomness is per sample, not per batch.** Every draw below — arc span,
+dropout mask, TGC curve, SNR, K level — is independent for each item in the
+batch. A per-batch draw would correlate the augmentation across a batch, and
+VICReg's variance/covariance terms are computed *across* the batch, so that
+correlation would land directly in the loss.
 
 **Never axial flip** (Policy B): depth is physically asymmetric here —
 attenuation, the transmit f-number geometry, and per-depth aperture coverage
@@ -32,9 +51,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
+import torch
 
-from . import transforms as tf
+from .transforms import reduce_and_normalize_torch
 
 # ── Policy B: geometry-only ──────────────────────────────────────────────────
 
@@ -45,71 +64,88 @@ class PolicyBConfig:
     flip_prob: float = 0.5
 
 
+def _rand(shape, generator, device) -> torch.Tensor:
+    return torch.rand(shape, generator=generator, device=device)
+
+
+def _randint(low: int, high: int, shape, generator, device) -> torch.Tensor:
+    """Uniform integers in ``[low, high)`` — torch's own semantics."""
+    return torch.randint(low, high, shape, generator=generator, device=device)
+
+
 def lateral_flip(
-    crop: np.ndarray, rng: np.random.Generator, x_axis: int, prob: float = 0.5
-) -> np.ndarray:
-    """Flip along ``x_axis`` only, with probability ``prob``. Never touches z."""
-    if rng.random() < prob:
-        return np.flip(crop, axis=x_axis).copy()
-    return crop
+    crop: torch.Tensor, generator: torch.Generator | None = None, prob: float = 0.5
+) -> torch.Tensor:
+    """Flip along x only, per sample, with probability ``prob``. Never touches z.
+
+    Args:
+        crop: ``(B, C, Z, X, ...)`` — x is axis 3.
+    """
+    flip = _rand((crop.shape[0],), generator, crop.device) < prob
+    flipped = torch.flip(crop, dims=(3,))
+    return torch.where(flip.view(-1, *([1] * (crop.ndim - 1))), flipped, crop)
 
 
 def spatial_jitter(
-    crop: np.ndarray, rng: np.random.Generator, z_axis: int, x_axis: int, max_px: int
-) -> np.ndarray:
-    """Shift by up to ``max_px`` pixels in z and independently in x.
+    crop: torch.Tensor, generator: torch.Generator | None = None, max_px: int = 4
+) -> torch.Tensor:
+    """Shift by up to ``max_px`` px in z and independently in x, per sample.
 
-    Implemented as reflect-pad + shift + crop-back-to-size, so it needs no
-    buffer beyond the crop itself. Reflect padding (not wrap) avoids stitching
-    the far edge of the array onto the near edge, which would fabricate a
-    discontinuity no real acquisition produces.
+    Reflect-padded then sliced, so no buffer beyond the crop is needed and the
+    far edge is never stitched onto the near edge — wrap-around padding would
+    fabricate a discontinuity no real acquisition produces.
+
+    The per-sample shift is applied with a gather rather than a Python loop
+    over the batch, so this stays one kernel regardless of batch size.
     """
     if max_px <= 0:
         return crop
-    dz = int(rng.integers(-max_px, max_px + 1))
-    dx = int(rng.integers(-max_px, max_px + 1))
-    if dz == 0 and dx == 0:
-        return crop
+    b, _, z, x = crop.shape[:4]
+    dev = crop.device
+    # Reflect padding cannot exceed the extent it reflects about, so the shift
+    # is clamped per axis. For real 128 px crops with max_px=4 this is a no-op;
+    # it only bites on degenerate axes, where no shift is meaningful anyway.
+    pz, px = min(max_px, z - 1), min(max_px, x - 1)
+    dz = _randint(-pz, pz + 1, (b,), generator, dev)
+    dx = _randint(-px, px + 1, (b,), generator, dev)
 
-    pad = [(0, 0)] * crop.ndim
-    pad[z_axis] = (max_px, max_px)
-    pad[x_axis] = (max_px, max_px)
-    padded = np.pad(crop, pad, mode="reflect")
+    # Reflect padding needs a 4-D (N,C,H,W) view; fold the trailing sector axis
+    # (if any) into channels, pad, then unfold.
+    flat = crop.reshape(b, -1, z, x)
+    padded = torch.nn.functional.pad(flat, (px, px, pz, pz), mode="reflect")
 
-    sl = [slice(None)] * crop.ndim
-    sl[z_axis] = slice(max_px - dz, max_px - dz + crop.shape[z_axis])
-    sl[x_axis] = slice(max_px - dx, max_px - dx + crop.shape[x_axis])
-    return padded[tuple(sl)]
+    zi = (torch.arange(z, device=dev).view(1, z) + pz - dz.view(b, 1))  # (B, Z)
+    xi = (torch.arange(x, device=dev).view(1, x) + px - dx.view(b, 1))  # (B, X)
+    out = padded[torch.arange(b, device=dev).view(b, 1, 1), :, zi.unsqueeze(-1), xi.unsqueeze(1)]
+    # Advanced indexing above yields (B, Z, X, C); restore the original layout.
+    return out.permute(0, 3, 1, 2).reshape(crop.shape)
 
 
 def policy_b(
-    crop: np.ndarray,
-    rng: np.random.Generator,
+    crop: torch.Tensor,
+    generator: torch.Generator | None = None,
     *,
-    z_axis: int,
-    x_axis: int,
     config: PolicyBConfig | None = None,
-) -> np.ndarray:
+) -> torch.Tensor:
     """Random lateral flip + mild spatial jitter. Geometry-only: nothing here
     touches sector/aperture content, so z_centre and x_centre survive
     (PLAN.md 4.1's "Policy B preserves geometry" row)."""
     config = config or PolicyBConfig()
-    out = lateral_flip(crop, rng, x_axis=x_axis, prob=config.flip_prob)
-    out = spatial_jitter(out, rng, z_axis=z_axis, x_axis=x_axis, max_px=config.jitter_px)
-    return out
+    out = lateral_flip(crop, generator, prob=config.flip_prob)
+    return spatial_jitter(out, generator, max_px=config.jitter_px)
 
 
 # ── Policy A: anatomy-focused ────────────────────────────────────────────────
 
 
 def random_sector_subset(
-    sums: np.ndarray,
-    occupancy: np.ndarray,
-    rng: np.random.Generator,
+    sums: torch.Tensor,
+    occupancy: torch.Tensor,
+    generator: torch.Generator | None = None,
     *,
     min_span: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Zero out all but a random contiguous arc of >= ``min_span`` sectors.
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Zero all but a random contiguous arc of >= ``min_span`` sectors, per sample.
 
     Two independent draws of this from the same crop are two different
     (overlapping or not) receive sub-apertures of the same scatterers — the
@@ -117,16 +153,16 @@ def random_sector_subset(
     Contiguous, not an arbitrary random subset, because sectors are angularly
     ordered and a non-contiguous "sub-aperture" is not a physical aperture.
     """
-    k = sums.shape[-1]
+    b, k = sums.shape[0], sums.shape[-1]
     if not (0 < min_span <= k):
         raise ValueError(f"min_span must be in (0, {k}], got {min_span}")
-    span = int(rng.integers(min_span, k + 1))
-    start = int(rng.integers(0, k))
-    keep = np.zeros(k, dtype=bool)
-    keep[(start + np.arange(span)) % k] = True
-    mask_sums = keep.reshape((1,) * (sums.ndim - 1) + (k,))
-    mask_occ = keep.reshape((1,) * (occupancy.ndim - 1) + (k,))
-    return sums * mask_sums, occupancy * mask_occ
+    dev = sums.device
+    span = _randint(min_span, k + 1, (b, 1), generator, dev)
+    start = _randint(0, k, (b, 1), generator, dev)
+    # offset of each sector from the arc start, modulo k -> inside iff < span
+    offset = (torch.arange(k, device=dev).view(1, k) - start) % k
+    keep = (offset < span).to(sums.dtype)  # (B, K)
+    return sums * keep.view(b, 1, 1, 1, k), occupancy * keep.view(b, 1, 1, k)
 
 
 def transmit_angle_pair(*_args, **_kwargs):
@@ -139,101 +175,113 @@ def transmit_angle_pair(*_args, **_kwargs):
     )
 
 
-def _dropout_mask(sums: np.ndarray, rng: np.random.Generator, *, p: float) -> np.ndarray:
-    """Broadcastable keep-mask for :func:`sector_dropout`."""
-    k = sums.shape[-1]
-    keep = rng.random(k) >= p
-    if not keep.any():
-        keep[rng.integers(k)] = True
-    return keep.reshape((1,) * (sums.ndim - 1) + (k,)).astype(sums.dtype, copy=False)
-
-
-def sector_dropout(sums: np.ndarray, rng: np.random.Generator, *, p: float) -> np.ndarray:
+def sector_dropout(
+    sums: torch.Tensor, generator: torch.Generator | None = None, *, p: float
+) -> torch.Tensor:
     """Independently zero each sector with probability ``p``; never all of them."""
-    return sums * _dropout_mask(sums, rng, p=p)
+    b, k = sums.shape[0], sums.shape[-1]
+    keep = _rand((b, k), generator, sums.device) >= p
+    # Any sample that lost every sector keeps one, chosen uniformly.
+    dead = ~keep.any(dim=1)
+    if bool(dead.any()):
+        rescue = _randint(0, k, (b,), generator, sums.device)
+        keep[dead, rescue[dead]] = True
+    return sums * keep.to(sums.dtype).view(b, 1, 1, 1, k)
 
 
 def tgc_gain_jitter(
-    crop: np.ndarray, rng: np.random.Generator, *, z_axis: int, max_db: float, n_control: int = 4
-) -> np.ndarray:
-    """Multiply by a smooth random depth-dependent gain within +-``max_db`` dB.
+    crop: torch.Tensor,
+    generator: torch.Generator | None = None,
+    *,
+    max_db: float,
+    n_control: int = 4,
+) -> torch.Tensor:
+    """Multiply by a smooth random depth-dependent gain within ±``max_db`` dB.
 
     A smooth (few-control-point, linearly-interpolated) curve rather than
     per-depth-independent noise, since a real TGC error is a slowly-varying
     knob setting, not sample-to-sample jitter.
     """
-    return crop * _tgc_gain(crop, rng, z_axis=z_axis, max_db=max_db, n_control=n_control)
-
-
-def _tgc_gain(
-    crop: np.ndarray, rng: np.random.Generator, *, z_axis: int, max_db: float, n_control: int = 4
-) -> np.ndarray:
-    """Broadcastable depth-gain curve for :func:`tgc_gain_jitter`."""
-    nz = crop.shape[z_axis]
-    control = rng.uniform(-max_db, max_db, size=n_control)
-    xp = np.linspace(0, nz - 1, n_control)
-    gain_db = np.interp(np.arange(nz), xp, control)
-    gain = (10.0 ** (gain_db / 20.0)).astype(crop.dtype)
-    shape = [1] * crop.ndim
-    shape[z_axis] = nz
-    return gain.reshape(shape)
+    b, nz = crop.shape[0], crop.shape[2]
+    dev = crop.device
+    control = (_rand((b, 1, n_control), generator, dev) * 2 - 1) * max_db
+    # Linear interpolation between control points == 1-D resize.
+    gain_db = torch.nn.functional.interpolate(
+        control, size=nz, mode="linear", align_corners=True
+    ).view(b, 1, nz, 1, 1)
+    return crop * torch.pow(10.0, gain_db / 20.0).to(crop.dtype)
 
 
 def additive_complex_noise(
-    crop: np.ndarray, rng: np.random.Generator, *, snr_db_range: tuple[float, float]
-) -> np.ndarray:
-    """Add i.i.d. Gaussian noise to every real channel, at a randomly sampled
-    SNR (relative to the crop's own RMS) drawn uniformly from ``snr_db_range``.
+    crop: torch.Tensor,
+    generator: torch.Generator | None = None,
+    *,
+    snr_db_range: tuple[float, float],
+) -> torch.Tensor:
+    """Add i.i.d. Gaussian noise to every real channel, at a per-sample SNR
+    (relative to that sample's own RMS) drawn uniformly from ``snr_db_range``.
 
     Adding equal, independent noise to the I and Q channels directly (rather
     than to a magnitude/envelope) keeps the noise circularly symmetric in the
     complex plane, which is what real receiver noise looks like at this stage.
     """
-    return _add_noise(crop.copy(), rng, snr_db_range=snr_db_range)
-
-
-def _signal_rms(crop: np.ndarray) -> float:
-    """RMS without materialising a float64 copy of the whole crop.
-
-    ``crop.astype(np.float64) ** 2`` allocates two arrays the size of the input
-    just to produce one scalar; on a (2, 128, 128, 16) crop in the training
-    loader that is 8 MB of churn per view. A flat dot product accumulates in
-    the same precision numpy's ``mean`` would use internally, pairwise.
-    """
-    flat = np.ravel(crop)
-    return float(np.sqrt(np.dot(flat, flat) / flat.size))
-
-
-def _add_noise(
-    crop: np.ndarray, rng: np.random.Generator, *, snr_db_range: tuple[float, float]
-) -> np.ndarray:
-    """In-place noise addition — the body of :func:`additive_complex_noise`.
-
-    Draws directly in the crop's own dtype: ``rng.normal(...)`` returns float64
-    and then needs a cast, which costs a second full-size temporary. Measured
-    as ~39% of loader time before this change.
-    """
-    snr_db = rng.uniform(*snr_db_range)
-    noise_rms = _signal_rms(crop) / (10.0 ** (snr_db / 20.0))
-    dtype = crop.dtype if crop.dtype in (np.float32, np.float64) else np.float32
-    noise = rng.standard_normal(crop.shape, dtype=dtype)
-    noise *= noise_rms
-    crop += noise
-    return crop
+    b = crop.shape[0]
+    lo, hi = snr_db_range
+    snr_db = _rand((b,), generator, crop.device) * (hi - lo) + lo
+    sig_rms = crop.flatten(1).pow(2).mean(dim=1).sqrt()
+    noise_rms = (sig_rms / torch.pow(10.0, snr_db / 20.0)).view(b, *([1] * (crop.ndim - 1)))
+    noise = torch.randn(crop.shape, generator=generator, device=crop.device, dtype=crop.dtype)
+    return crop + noise * noise_rms
 
 
 def random_k_reduction(
-    sums: np.ndarray,
-    occupancy: np.ndarray,
-    rng: np.random.Generator,
+    sums: torch.Tensor,
+    occupancy: torch.Tensor,
+    generator: torch.Generator | None = None,
     *,
     choices: tuple[int, ...],
     mode: str = "mean",
-) -> tuple[np.ndarray, int]:
-    """Reduce+normalize (PLAN.md WI-5's one correct order) to a randomly
-    chosen K on the ladder."""
-    k = int(rng.choice(choices))
-    return tf.reduce_and_normalize(sums, occupancy, target_k=k, mode=mode), k
+    expand_to: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reduce+normalize (PLAN.md WI-5's one correct order) to a per-sample K.
+
+    Each sample draws its own level from ``choices``; samples sharing a level
+    are processed together, so this costs one pass per *distinct* level in the
+    batch (at most 5) rather than one per sample.
+
+    ``expand_to`` repeats surviving sectors back up to a fixed width so the
+    batch can be stacked for an encoder whose input is a fixed ``2K`` channels
+    — see :func:`ssl_us.data.dataset.match_sector_channels` for why repeating
+    beats zero-padding.
+
+    Returns ``(views, k_per_sample)``.
+    """
+    b = sums.shape[0]
+    dev = sums.device
+    if expand_to is not None:
+        # An arm of width K cannot be handed a view with *more* than K sectors,
+        # so levels coarser than the arm are simply not on its ladder. Filtering
+        # here rather than at each call site keeps the arm's K the single source
+        # of truth for what the augmentation may draw.
+        choices = tuple(c for c in choices if c <= expand_to and expand_to % c == 0)
+        if not choices:
+            raise ValueError(f"no K level divides expand_to={expand_to}")
+    picks = torch.tensor(choices, device=dev)[
+        _randint(0, len(choices), (b,), generator, dev)
+    ]
+    width = expand_to if expand_to is not None else int(picks.min())
+    out = torch.empty(
+        (*sums.shape[:-1], width), dtype=sums.dtype, device=dev
+    )
+    for k in picks.unique().tolist():
+        sel = picks == k
+        view = reduce_and_normalize_torch(sums[sel], occupancy[sel], target_k=int(k), mode=mode)
+        if view.shape[-1] != width:
+            if width % view.shape[-1]:
+                raise ValueError(f"cannot expand k={view.shape[-1]} to {width}")
+            view = view.repeat_interleave(width // view.shape[-1], dim=-1)
+        out[sel] = view
+    return out, picks
 
 
 @dataclass(frozen=True)
@@ -247,27 +295,33 @@ class PolicyAConfig:
 
 
 def policy_a(
-    sums16: np.ndarray,
-    occupancy16: np.ndarray,
-    rng: np.random.Generator,
+    sums16: torch.Tensor,
+    occupancy16: torch.Tensor,
+    generator: torch.Generator | None = None,
     *,
-    z_axis: int,
     config: PolicyAConfig | None = None,
-) -> tuple[np.ndarray, int]:
+    expand_to: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Full Policy A chain on raw K=16 sector sums: sub-aperture subset ->
     sector dropout -> TGC jitter -> additive noise -> random K-reduction.
 
     Order matters: everything that touches raw sums happens *before*
     :func:`random_k_reduction`, so the K-reduction step is always the last
     thing applied to raw data, per WI-5's reduce-then-normalize rule.
+
+    Args:
+        sums16: ``(B, 2, Z, X, 16)`` raw sector sums, straight from the store.
+        occupancy16: ``(B, Z, X, 16)`` matching element counts.
+        expand_to: fixed output sector width (the arm's K).
     """
     config = config or PolicyAConfig()
-    # `random_sector_subset` already returns a fresh array, so every step after
-    # it mutates that private buffer in place rather than allocating another
-    # full-size copy per stage. The public single-step functions stay pure;
-    # only this chain, which owns `s`, takes the in-place path.
-    s, occ = random_sector_subset(sums16, occupancy16, rng, min_span=config.sector_subset_min_span)
-    s *= _dropout_mask(s, rng, p=config.dropout_p)
-    s *= _tgc_gain(s, rng, z_axis=z_axis, max_db=config.tgc_max_db)
-    s = _add_noise(s, rng, snr_db_range=config.snr_db_range)
-    return random_k_reduction(s, occ, rng, choices=config.k_choices, mode=config.normalize_mode)
+    s, occ = random_sector_subset(
+        sums16, occupancy16, generator, min_span=config.sector_subset_min_span
+    )
+    s = sector_dropout(s, generator, p=config.dropout_p)
+    s = tgc_gain_jitter(s, generator, max_db=config.tgc_max_db)
+    s = additive_complex_noise(s, generator, snr_db_range=config.snr_db_range)
+    return random_k_reduction(
+        s, occ, generator, choices=config.k_choices, mode=config.normalize_mode,
+        expand_to=expand_to,
+    )

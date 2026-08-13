@@ -101,3 +101,46 @@ def reduce_and_normalize(
     reduced_sums = reduce_ladder(sector_sums, target_k, axis=axis)
     reduced_occ = reduce_ladder(occupancy, target_k, axis=axis)
     return normalize(reduced_sums, reduced_occ, mode=mode)
+
+
+# ── torch mirror, for the GPU training path ─────────────────────────────────
+#
+# The training loader augments on the GPU (see `ssl_us.data.augment`), so the
+# ladder is needed on tensors as well as arrays. It is kept in this file,
+# directly beside the NumPy version, precisely because it is a second
+# implementation of a rule that must not drift — `test_transforms.py` asserts
+# the two agree numerically. The NumPy version remains the one the store's
+# read path uses (WI-8's verify/profile scripts, the eval matrix); the torch
+# one exists only where a device round-trip would otherwise be required.
+
+
+def reduce_and_normalize_torch(
+    sector_sums, occupancy, target_k: int, mode: str = "mean"
+):
+    """Torch mirror of :func:`reduce_and_normalize`, sector axis last.
+
+    Args:
+        sector_sums: ``(..., K)`` raw sums.
+        occupancy: ``(..., K)`` counts, broadcastable against ``sector_sums``
+            once the sector axis is reduced (typically missing the channel axis).
+    """
+    import torch
+
+    k = sector_sums.shape[-1]
+    if k % target_k:
+        raise ValueError(f"target_k ({target_k}) must divide K ({k})")
+
+    def _reduce(t):
+        if t.shape[-1] == target_k:
+            return t
+        return t.reshape(*t.shape[:-1], target_k, t.shape[-1] // target_k).sum(dim=-1)
+
+    sums = _reduce(sector_sums)
+    occ = _reduce(occupancy.to(sums.dtype))
+    if occupancy.ndim == sector_sums.ndim - 1:
+        occ = occ.unsqueeze(1)  # (B, Z, X, k) -> (B, 1, Z, X, k)
+    denom = occ if mode == "mean" else torch.sqrt(occ)
+    if mode not in ("mean", "rms"):
+        raise ValueError(f"unknown normalization mode {mode!r}; expected 'mean' or 'rms'")
+    # Empty sectors are exactly 0, never NaN/inf: nothing was summed into them.
+    return torch.where(denom > 0, sums / torch.where(denom > 0, denom, 1.0), 0.0)

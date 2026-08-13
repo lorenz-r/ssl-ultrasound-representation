@@ -13,13 +13,7 @@ import pytest
 from ssl_us.beamform import sectors as sec
 from ssl_us.beamform.store import SectorStore, StoreSpec
 from ssl_us.data import geometry as geo
-from ssl_us.data.dataset import (
-    FrameCache,
-    LoaderConfig,
-    SectorCropDataset,
-    match_sector_channels,
-    to_model_input,
-)
+from ssl_us.data.dataset import FrameCache, LoaderConfig, SectorCropDataset
 
 
 @pytest.fixture(scope="module")
@@ -55,32 +49,29 @@ def test_arm_for_high_k_is_64px_and_respects_the_8mm_floor():
     assert cfg.in_channels == 32
 
 
-# ── channel layout ───────────────────────────────────────────────────────────
+# ── raw-crop contract ────────────────────────────────────────────────────────
 
 
-def test_to_model_input_packs_iq_then_sectors():
-    view = np.zeros((2, 4, 5, 3), dtype=np.float32)
-    view[0, ..., 2] = 1.0  # I, sector 2
-    view[1, ..., 0] = 2.0  # Q, sector 0
-    out = to_model_input(view)
-    assert out.shape == (6, 4, 5)
-    assert out[2].max() == 1.0  # I-block: channels 0..2
-    assert out[3].max() == 2.0  # Q-block starts at 3
+def test_yields_raw_sums_and_matching_occupancy(tiny_store):
+    """The loader deliberately does NOT augment: it hands raw K=16 sums plus
+    the occupancy for the same window to the GPU augmentor."""
+    cfg = LoaderConfig(store_path=tiny_store, k=4, crop_size=128, crops_per_frame=2, cache_frames=2)
+    sums, occ = next(iter(SectorCropDataset(cfg)))
+    assert sums.shape == (2, 128, 128, 16)
+    assert occ.shape == (128, 128, 16)
+    assert sums.dtype == np.float32 and occ.dtype == np.float32
+    assert np.isfinite(sums).all()
 
 
-def test_match_sector_channels_repeats_rather_than_zero_pads():
-    """Zero-padding would let the model read off `k` from which channels are
-    zero — a shortcut instead of invariance."""
-    view = np.arange(2 * 2 * 2 * 2, dtype=np.float32).reshape(2, 2, 2, 2)
-    out = match_sector_channels(view, 8)
-    assert out.shape == (2, 2, 2, 8)
-    assert np.all(out != 0) or np.count_nonzero(out) >= np.count_nonzero(view)
-    np.testing.assert_array_equal(out[..., :4], np.repeat(view[..., :1], 4, axis=-1))
-
-
-def test_match_sector_channels_rejects_non_multiple():
-    with pytest.raises(ValueError, match="not a multiple"):
-        match_sector_channels(np.zeros((2, 2, 2, 3)), 8)
+def test_occupancy_crop_matches_the_store_window(tiny_store):
+    """Occupancy is frame-invariant geometry; the crop must be the same window
+    as the sums, or normalisation divides by the wrong element counts."""
+    cfg = LoaderConfig(store_path=tiny_store, k=4, crop_size=64, crops_per_frame=1, cache_frames=1)
+    ds = SectorCropDataset(cfg)
+    rng = np.random.default_rng(0)
+    z0, x0 = ds._sample_origin(rng)
+    expected = ds.occupancy[z0 : z0 + 64, x0 : x0 + 64, :]
+    assert expected.shape == (64, 64, 16)
 
 
 # ── the frame cache: batches must mix frames ─────────────────────────────────
@@ -110,28 +101,6 @@ def test_frame_cache_respects_the_per_frame_quota(tiny_store):
 
 
 # ── iteration contract ───────────────────────────────────────────────────────
-
-
-def test_yields_pairs_of_the_right_shape(tiny_store):
-    cfg = LoaderConfig(store_path=tiny_store, k=4, crop_size=128, crops_per_frame=2, cache_frames=2)
-    ds = SectorCropDataset(cfg)
-    v1, v2 = next(iter(ds))
-    assert v1.shape == v2.shape == (cfg.in_channels, 128, 128)
-    assert v1.dtype == np.float32
-    assert np.isfinite(v1).all() and np.isfinite(v2).all()
-
-
-def test_two_views_of_the_same_crop_differ(tiny_store):
-    """Positive pair = two augmentations of one region, not two regions."""
-    cfg = LoaderConfig(store_path=tiny_store, k=4, crops_per_frame=2, cache_frames=2, policy="A")
-    v1, v2 = next(iter(SectorCropDataset(cfg)))
-    assert not np.allclose(v1, v2)
-
-
-def test_policy_b_also_produces_arm_width_channels(tiny_store):
-    cfg = LoaderConfig(store_path=tiny_store, k=2, crops_per_frame=2, cache_frames=2, policy="B")
-    v1, v2 = next(iter(SectorCropDataset(cfg)))
-    assert v1.shape[0] == cfg.in_channels == 4
 
 
 def test_epoch_is_deterministic_and_epochs_differ(tiny_store):

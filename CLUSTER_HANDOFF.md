@@ -14,7 +14,7 @@ full-corpus work was scoped out deliberately, not skipped by accident.
 **Phase 2 (cluster, TITAN RTX `24g`)** did the GPU and full-corpus work:
 WI-4's real-data gate (which had to be *rewritten* — see below) and WI-8's
 full 923-frame build, which now exists at
-`/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr`. **212 tests pass, `ruff
+`/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr`. **246 tests pass, `ruff
 check .` is clean, `pip install -e .` reproduces the environment** — no
 Poetry needed on the cluster; `pyproject.toml` declares its metadata in the
 standard PEP 621 `[project]` table, so plain `pip` builds it correctly
@@ -92,6 +92,7 @@ inference-only feature extraction)? → `12g` first. Is it neither? → `data`.
 | WI-15 | Cross-aperture prediction arm (optional in the plan) | `src/ssl_us/models/xaperture.py` | `test_xaperture.py` (15) |
 | WI-16 | Stanford `.mat` reader + HVMux remap | `src/ssl_us/beamform/stanford_mat.py` | `test_stanford_mat.py` (12, run against the real files in `data/rats/`) |
 | WI-8 | Full K-sector store: per-frame beamforming, zarr store + reader, resumable build — **923/923 frames built** | `src/ssl_us/beamform/{frame,store}.py`, `scripts/wi8_{build,verify,profile}.py` | `test_store.py` (11), `test_wi8_build.py` (6) |
+| WI-11/12 | Augmentation policies (**batched torch, GPU**) + store-backed crop loader with frame-cached shuffle buffer | `src/ssl_us/data/{augment,dataset}.py` | `test_augment.py` (24), `test_dataset.py` (12), `test_transforms.py` (18) |
 | WI-10 | Splits + leakage guard, **verified on the real 923-frame store**; per-run split-audit figure | `src/ssl_us/data/splits.py`, `src/ssl_us/eval/viz.py` (`plot_split_audit`), `scripts/wi10_splits.py` | `test_wi10_splits.py` (12), `test_guards.py` |
 | WI-0 | (pre-existing) NVIDIA frame verification | `scripts/wi0_probe.py` | `test_nv_frame.py` (8) |
 
@@ -99,7 +100,7 @@ Every *test* above runs without a GPU or the full corpus — they use synthetic
 data, a small real download (a couple of NVIDIA frames), or the real local
 Stanford `.mat` files in `data/rats/`. ⚠ **`data/rats/` is not present on the
 cluster** (it was local to the phase-1 laptop), so `pytest -q` here reports
-**224 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
+**246 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
 cleanly. Re-download the Stanford `.mat` files before WI-16 work. The two exceptions are the artefacts
 rather than the tests: WI-4's gate numbers and WI-8's 923-frame store were
 both produced on a `24g` GPU instance against the full corpus.
@@ -346,6 +347,62 @@ KERAS_BACKEND=jax python scripts/wi8_build.py \
 
 With that, `/` stayed flat at 537 MB for the whole 923-frame run.
 
+### WI-12 — training loader is DONE; the runs themselves are not
+
+`src/ssl_us/data/dataset.py` reads the WI-8 store and feeds VICReg. Two things
+about it are load-bearing and were driven by measurement, not taste:
+
+1. **Frame-cached shuffle buffer.** The store chunks one *frame* per zarr chunk
+   (§3.7), so any single crop costs a full-frame decompress (~30 ms). The cache
+   amortises that across `crops_per_frame` crops **and** holds `cache_frames`
+   frames resident at once, drawing each crop from a random resident frame.
+   The second part is correctness, not polish: VICReg's variance/covariance
+   terms are computed *across the batch*, so a batch drawn from one frame has
+   collapsed batch statistics.
+2. **Augmentation runs on the GPU, and there is only one implementation of it.**
+   `augment.py` is batched torch (it runs on CPU tensors too, so tests and the
+   WI-11 figure need no GPU). A NumPy copy "for tests" was deliberately *not*
+   kept — it would be a second definition of the semantics, free to drift from
+   the one that trains the model.
+
+Measured on the `24g` instance (4 CPU cores — that count is the whole reason
+for the GPU split):
+
+| Loader | pairs/s | 11.8M pairs (400 ep × 115 steps × 256) |
+|---|---|---|
+| Naive crop-indexed | ~17 | ~190 h |
+| + frame cache | 28 | 117 h |
+| + numeric fixes (2.08×) | 59 | 55 h |
+| + 4 DataLoader workers | 157 | 21 h |
+| **+ GPU augmentation** | **588 (A) / 442 (B)** | **5.6 h / 7.4 h** |
+
+PLAN.md §5.4 budgets 4–6 h/run, so Policy A is in band and Policy B is a little
+over. Peak GPU memory for the data path is 2.0 GB, leaving plenty beside the
+model. The remaining lever, if it ever matters: the loader ships the occupancy
+crop alongside the sums (~1/3 of PCIe traffic) even though occupancy is
+frame-invariant and could be gathered device-side from a single resident copy.
+
+Usage — `train_vicreg` takes any iterable of `(view1, view2)` batches:
+
+```python
+cfg = LoaderConfig.for_arm(store, k=4, policy="A", frame_ids=splits["train"])
+loader = make_dataloader(cfg, batch_size=256, num_workers=4)
+for x1, x2 in GpuAugmentor(cfg, device="cuda").wrap(loader):
+    ...
+```
+
+`LoaderConfig.for_arm` encodes PLAN.md §3.2c/d's two internally-consistent
+arms (`K ≤ 4 @ 128` full depth, `K ≥ 8 @ 64` with z ≥ 8 mm) so K and crop size
+cannot drift apart.
+
+**One open question, flagged not decided.** Policy A's *primary* augmentation is
+a random K-reduction, but the encoder's input is a fixed `2K` channels. The
+loader reduces to the drawn k and then repeats surviving sectors back up to the
+arm's K — repeating rather than zero-padding, since zeros would let the model
+read `k` straight off the empty channels (a shortcut instead of invariance).
+Controlled by `LoaderConfig.k_jitter`, default on. PLAN.md does not resolve
+this; confirm before the real runs.
+
 ### WI-9 — HuggingFace publication
 
 Needs WI-8's output. Not started — no code written for the dataset card or
@@ -447,7 +504,7 @@ image.
 
 ## Quick sanity checklist before starting new work
 
-- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 224 passed, 6 skipped
+- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 246 passed, 6 skipped
       (the 6 skips are `test_stanford_mat.py`, which needs `data/rats/*.mat`)
 - [ ] `ruff check .` → clean
 - [x] On a `12g`/`24g` instance: `nvidia-smi` works — confirmed, TITAN RTX
