@@ -1534,10 +1534,27 @@ to prevent regressing to the old `normalize_frame` behaviour (§1.3).
 
 ---
 
-**WI-8 — Full build. `[dep: WI-6, WI-7]`**
+**WI-8 — Full build. `[dep: WI-6, WI-7]` — ✅ DONE (rev-5)**
 
-923 frames. Estimated **6–10 h wall** on one 4090 node: download-bound (271 GB) plus
-~3–4 h GPU (§5.4). Produces ~27 GB uncompressed / ~20 GB compressed.
+**Built: 923/923 frames at `/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr`**, 23 GB,
+`(923, 2, 507, 456, 16)` float32 raw sector sums, f#=1.5 / K=16. Every done-when
+clause below is met: manifest complete; WI-4's (rev-5) gate re-run on 10 frames read
+back *from the store* passes 10/10 (`tests/data/wi8_store_verification.json`); the
+corpus depth-RMS profile is plotted (`figures/wi8/depth_rms_profile.png`, 7.6 dB
+decay 5–10 → 30–38 mm); and all 923 frames verified finite and non-empty. Code:
+`beamform/{frame,store}.py`, `scripts/wi8_{build,verify,profile}.py`.
+
+Two independent confirmations the store indexes correctly: exactly **75** frames have
+an empty `segmentation_map`, matching §2's separately measured 75/923; and per-frame
+RMS is trimodal, matching §2.3's three `t0` values (435/116/372).
+
+*Original estimate, superseded:* 6–10 h wall, ~3–4 h GPU. **Actual: ~2 h wall**,
+~3.25 s/frame GPU (~50 min total). The wall estimate was wrong in both directions —
+see §5.4's rev-5 note: `datasets` streaming runs at 2.7 MB/s here where a plain shard
+download runs at ~70 MB/s, so the build fetches one parquet shard at a time and
+deletes it. See CLUSTER_HANDOFF.md for the three traps this shook out (blosc thread
+deadlock; `hf_hub_download` returning a symlink so per-shard deletes free nothing;
+caches defaulting onto a 32 GB overlay).
 
 *Done when:* 923/923 frames present, manifest complete, WI-4's validation re-run on
 10 random frames from the finished store still passes the gate, and the depth-RMS

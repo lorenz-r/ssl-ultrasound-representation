@@ -65,7 +65,7 @@ rows are still a judgement call from what each step computes — fall back to
 | Instance | Use it for | Why |
 |---|---|---|
 | `data` | `pip install -e ".[dev]"`, `pytest -q`, `ruff check .`; downloading the NVIDIA frames, Stanford `.mat` files, and any HuggingFace assets (incl. the `facebook/dinov3-*`/`dinov2` weights once the gated request clears); the I/O-bound parts of WI-8's resumable build; submitting the `facebook/dinov3-*` gated-access request itself | Nothing here touches a GPU — running it on `12g`/`24g` would just burn GPU-instance time on CPU work. |
-| `12g` | WI-8's GPU beamform pass, and any re-run of `scripts/wi4_reference_validation.py` (`KERAS_BACKEND=jax`, 507×456 — **now passing**, ~3 s per variant per frame, so it is download-bound, not compute-bound) | Beamforming is inference-only delay-and-sum over a fixed pixel grid — no gradients, no optimizer state, no large activation stacks — so 12 GB should comfortably cover it. Try this before reaching for `24g`. Confirmed: WI-4's full-resolution run used well under 12 GB on a 24 GB card. |
+| `12g` | Any *re*-build or extension of the K-sector store (`scripts/wi8_build.py`) and re-runs of `scripts/wi4_reference_validation.py` / `wi8_verify.py` (`KERAS_BACKEND=jax`, 507×456). Both are done as of now; measured ~3.25 s/frame, so these are download-bound, not compute-bound. | Beamforming is inference-only delay-and-sum over a fixed pixel grid — no gradients, no optimizer state, no large activation stacks — so 12 GB should comfortably cover it. Try this before reaching for `24g`. Confirmed: WI-4's full-resolution run used well under 12 GB on a 24 GB card. |
 | `24g` | WI-12 VICReg training, WI-14's MAE baseline, WI-15's cross-aperture arm, and WI-13's results-matrix runs (feature extraction, incl. any DINOv3/DINOv2 baselines) | Training holds activations, gradients, and optimizer state at once, and VICReg's variance/covariance terms are computed per-batch, so batch size (and headroom for it) matters — give training runs the bigger card. |
 
 If you're unsure which bucket a new script falls into: does it call
@@ -94,11 +94,17 @@ inference-only feature extraction)? → `12g` first. Is it neither? → `data`.
 | WI-8 | Full K-sector store: per-frame beamforming, zarr store + reader, resumable build — **923/923 frames built** | `src/ssl_us/beamform/{frame,store}.py`, `scripts/wi8_{build,verify,profile}.py` | `test_store.py` (11), `test_wi8_build.py` (6) |
 | WI-0 | (pre-existing) NVIDIA frame verification | `scripts/wi0_probe.py` | `test_nv_frame.py` (8) |
 
-None of the above needed a CUDA GPU or the full corpus — every test either
-uses synthetic data, a small real download (a couple of NVIDIA frames), or
-the real local Stanford `.mat` files already sitting in `data/rats/`.
+Every *test* above runs without a GPU or the full corpus — they use synthetic
+data, a small real download (a couple of NVIDIA frames), or the real local
+Stanford `.mat` files in `data/rats/`. ⚠ **`data/rats/` is not present on the
+cluster** (it was local to the phase-1 laptop), so `pytest -q` here reports
+**212 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
+cleanly. Re-download the Stanford `.mat` files before WI-16 work. The two exceptions are the artefacts
+rather than the tests: WI-4's gate numbers and WI-8's 923-frame store were
+both produced on a `24g` GPU instance against the full corpus.
 
-**Two real bugs were found and fixed along the way**, worth knowing about:
+**Two phase-1 bugs were found and fixed along the way**, worth knowing about
+(the three WI-8 build traps are listed under WI-8):
 1. `.gitignore`'s bare `data/` pattern was also matching `tests/data/`,
    silently excluding `tests/data/wi0_results.json` from any future commit.
    Fixed to `/data/` (anchored to repo root).
@@ -233,7 +239,8 @@ Resume was verified against the real store (4.9 s, no download, no
 beamforming), and the shard-based and streaming source paths were checked
 against each other and produce **bit-identical** frames.
 
-**Two measured surprises, both of which change the plan's numbers:**
+**Three traps found by running it. All three are fixed in the code, and all
+three are the kind that come back if someone "simplifies" it:**
 
 1. **Never use `datasets` streaming for this corpus — it is the bottleneck,
    not the network.** Measured on this cluster:
@@ -262,15 +269,22 @@ against each other and produce **bit-identical** frames.
    the process hung in `D` state and had to be `kill -9`'d). The build also
    writes the label sidecar every frame rather than once at the end, and
    `os._exit`s after the final flush, so a hung shutdown cannot lose work.
+3. **Deleting a downloaded shard does not free it, unless you download it
+   right.** `hf_hub_download`'s default cache returns a **symlink into
+   `blobs/`**; unlinking that frees nothing, so "download shard, use it, delete
+   it" silently accumulates the entire 271 GB. Caught mid-launch: the HF cache
+   sits on the 32 GB overlay and went 537 MB → 7.0 GB on the *first* shard.
+   The build therefore downloads with `local_dir=` into `--scratch` (a real
+   file that can actually be deleted) and clears the arrow cache too. Verified
+   across shard boundaries: `/` stays flat instead of growing per shard.
 
-**Storage, measured:** ~26 MB/frame compressed ⇒ **~24 GB** for 923 frames
-(29.6 MB/frame uncompressed, per §3.7). Note `/tmp` on these instances is
+**Storage, measured:** ~26 MB/frame compressed ⇒ **23 GB** for 923 frames
+(29.6 MB/frame uncompressed, per §3.7). `/tmp` on these instances is
 **ephemeral** — its contents were empty at container start and do not survive
-an instance change — so a multi-hour build must not leave its only copy there.
-The NFS home persists but is quota'd; a 10 GB probe write succeeded with home
-at 50 GB (33 GB of which is `new_arch_custom.sqsh`), so the headroom is real
-but not unlimited. Build to fast local scratch, then copy the ~24 GB result
-somewhere persistent (or straight to the Hub, WI-9).
+an instance change — so the build wrote there for speed and the result was
+copied to the NFS home, then checked frame-identical. Home is quota'd but has
+room: a **25 GB** probe write succeeded with home already at 50 GB (33 GB of
+which is `new_arch_custom.sqsh`).
 
 Run it:
 
@@ -296,12 +310,17 @@ Settings the WI-4 run pins down for it:
 - Axis order: treating raw axis 0 as transmit is fine — measured immaterial
   (0.2587 vs 0.2573), as PLAN.md §10.2 predicted from reciprocity.
 
-Estimated 3-4h GPU / 6-10h wall (download-bound), per PLAN.md §5.4 — and the
-WI-4 timings support "download-bound": beamforming a full 507×456 frame took
-~3.1 s per variant on a TITAN RTX, against minutes per frame to stream the
-~265 MB of raw IQ. Note `HF_CACHE_DIR` is already set to `/tmp/hf_cache` on
-these instances, which is on a large local disk (816 GB free) rather than the
-quota'd NFS home — keep it that way for a 271 GB pull.
+**Caches must be pointed off the small overlay.** `/` on these instances is a
+32 GB `fuse-overlayfs`, and both the HF hub cache (`~/.cache/huggingface`) and
+the `datasets` arrow cache default onto it. The build as run set:
+
+```bash
+export HF_HOME=/tmp/hf_home HF_DATASETS_CACHE=/tmp/hf_datasets_cache
+KERAS_BACKEND=jax python scripts/wi8_build.py \
+    --out /tmp/wi8_full.zarr --scratch /tmp/wi8_shards
+```
+
+With that, `/` stayed flat at 537 MB for the whole 923-frame run.
 
 ### WI-9 — HuggingFace publication
 
@@ -321,8 +340,8 @@ protocol, guards, and baselines need no changes.
 
 `scripts/wi8_verify.py` shows the intended read path end to end (reduce the
 K-ladder, *then* normalize — never the reverse). `eval/matrix.py`'s
-`load_bootstrap` is the shape to match when wiring the matrix onto it. Still
-blocked on WI-8's full build actually having been run.
+`load_bootstrap` is the shape to match when wiring the matrix onto it.
+**No longer blocked** — the store exists (see WI-8 above).
 
 ### WI-16 — Stanford, past the reader
 
