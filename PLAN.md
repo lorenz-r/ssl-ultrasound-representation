@@ -1580,7 +1580,21 @@ reproduces a stored checksum, and the card renders with every section above.
 
 ---
 
-**WI-10 — Splits + leakage assertion. `[dep: WI-8]`**
+**WI-10 — Splits + leakage assertion. `[dep: WI-8]` — ✅ DONE (rev-5)**
+
+**Verified on the built store**, not just asserted in code
+(`scripts/wi10_splits.py`, results `tests/data/wi10_splits.json`, figure
+`figures/wi10/split_audit.png`): outer split 830 train / 93 validation = 923,
+inner probe split 664/166 carved from train only, guard passes at both levels.
+
+The distributional-matching claim below was measured during planning from the
+*source* dataset; re-measured from the *built* store it reproduces closely —
+`sos_mean` 1474.0±47.1 vs 1471.4±48.0 (Welch t = 0.60), `phase_error`
+1.826±0.278 vs 1.827±0.278 (t = −0.02). Neither is detectably different, so
+adopting NVIDIA's boundary wholesale stands. `cyst_fraction` is the least
+matched axis (t = 1.86, under the |t| < 2 bar but the closest to it) and is
+worth a glance if a cyst probe ever looks odd. Empty-`segmentation_map` frames
+split 63 train / 12 validation, matching §2's independent count exactly.
 
 Adopt NVIDIA's train/validation as the outer split (they are distributionally
 matched — measured: `sos_mean` 1474.2 ± 47.0 vs 1471.1 ± 47.8; `phase_error`

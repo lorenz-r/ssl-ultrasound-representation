@@ -46,16 +46,24 @@ def load_bootstrap(path: str | Path) -> dict:
     d = np.load(path, allow_pickle=True)
     sos = d["sos"]
     flat = sos.reshape(len(sos), -1)
+    frame_id = d["frame_id"].astype(str)
+    frame_labels = {
+        "phase_error": d["phase_error"].astype(np.float32),
+        "t0_group": np.array([geo.t0_group(t) for t in d["t0"]], dtype=np.int64),
+        "sos_mean_frame": flat.mean(1).astype(np.float32),
+        "sos_std_frame": flat.std(1).astype(np.float32),
+    }
     return {
         "bmode": d["bmode"],
         "seg": d["seg"],
         "sos": sos,
-        "frame_id": d["frame_id"].astype(str),
-        "frame_labels": {
-            "phase_error": d["phase_error"].astype(np.float32),
-            "t0_group": np.array([geo.t0_group(t) for t in d["t0"]], dtype=np.int64),
-            "sos_mean_frame": flat.mean(1).astype(np.float32),
-            "sos_std_frame": flat.std(1).astype(np.float32),
+        "frame_id": frame_id,
+        "frame_labels": frame_labels,
+        # Same labels keyed by frame id, for the WI-10 split-audit figure —
+        # it needs to look a label up per split member, not per row.
+        "frame_labels_by_id": {
+            fid: {k: float(v[i]) for k, v in frame_labels.items()}
+            for i, fid in enumerate(frame_id)
         },
     }
 
@@ -82,6 +90,15 @@ def run(config: dict) -> dict:
     inner = inner_probe_split(outer["train"], seed=config["seed"])
     audit = split_audit(data["frame_id"], outer, inner)
     print(f"split audit: {json.dumps(audit)}")
+    # Emitted unconditionally, per PLAN.md WI-10's done-condition: the audit is
+    # only useful if it is produced on every run rather than on request.
+    audit_fig = viz.plot_split_audit(
+        outer,
+        out_dir / "split_audit.png",
+        inner=inner,
+        frame_labels=data.get("frame_labels_by_id"),
+        label_keys=("sos_mean_frame", "phase_error"),
+    )
 
     # ── crops ────────────────────────────────────────────────────────────────
     spec = CropSpec(
@@ -139,7 +156,7 @@ def run(config: dict) -> dict:
     clusters = cluster_report(feats_cache[ref], batch.labels)
     print(f"clustering ({ref}): {json.dumps(clusters, indent=1)}")
 
-    figs = []
+    figs = [audit_fig]
     for method in config["projections"]:
         sub = np.arange(len(batch))
         if len(sub) > config["max_points"]:

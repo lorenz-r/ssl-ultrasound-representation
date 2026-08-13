@@ -92,13 +92,14 @@ inference-only feature extraction)? → `12g` first. Is it neither? → `data`.
 | WI-15 | Cross-aperture prediction arm (optional in the plan) | `src/ssl_us/models/xaperture.py` | `test_xaperture.py` (15) |
 | WI-16 | Stanford `.mat` reader + HVMux remap | `src/ssl_us/beamform/stanford_mat.py` | `test_stanford_mat.py` (12, run against the real files in `data/rats/`) |
 | WI-8 | Full K-sector store: per-frame beamforming, zarr store + reader, resumable build — **923/923 frames built** | `src/ssl_us/beamform/{frame,store}.py`, `scripts/wi8_{build,verify,profile}.py` | `test_store.py` (11), `test_wi8_build.py` (6) |
+| WI-10 | Splits + leakage guard, **verified on the real 923-frame store**; per-run split-audit figure | `src/ssl_us/data/splits.py`, `src/ssl_us/eval/viz.py` (`plot_split_audit`), `scripts/wi10_splits.py` | `test_wi10_splits.py` (12), `test_guards.py` |
 | WI-0 | (pre-existing) NVIDIA frame verification | `scripts/wi0_probe.py` | `test_nv_frame.py` (8) |
 
 Every *test* above runs without a GPU or the full corpus — they use synthetic
 data, a small real download (a couple of NVIDIA frames), or the real local
 Stanford `.mat` files in `data/rats/`. ⚠ **`data/rats/` is not present on the
 cluster** (it was local to the phase-1 laptop), so `pytest -q` here reports
-**212 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
+**224 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
 cleanly. Re-download the Stanford `.mat` files before WI-16 work. The two exceptions are the artefacts
 rather than the tests: WI-4's gate numbers and WI-8's 923-frame store were
 both produced on a `24g` GPU instance against the full corpus.
@@ -217,8 +218,31 @@ The depth-RMS profile is **measured and stored, never divided out** — PLAN.md
 §1.3's warning about the old repo's `normalize_frame` deleting the attenuation
 signal that §4.5c exists to probe.
 
-WI-9 (HF publication), WI-10 (splits), WI-13 (results matrix) and WI-12
-(VICReg training) are all unblocked by this.
+WI-9 (HF publication), WI-13 (results matrix) and WI-12 (VICReg training) are
+all unblocked by this. **WI-10 is now done** — see below.
+
+### WI-10 — DONE. Splits verified against the real corpus.
+
+`splits.py` + the leakage guard already existed from WI-2; what WI-10 needed
+was running them on the real store and emitting the audit figure. Both done
+(`scripts/wi10_splits.py` → `tests/data/wi10_splits.json`,
+`figures/wi10/split_audit.png`):
+
+- Outer 830 train / 93 validation = 923; inner probe split 664/166 carved from
+  train only; guard passes at both levels; nothing straddles.
+- **PLAN.md §8's distributional-matching claim re-verified from the built
+  store** — `sos_mean` Welch t = 0.60, `phase_error` t = −0.02, both far inside
+  the |t| < 2 bar, and both reproducing the planning-time means to within a
+  fraction of a standard deviation. This is a real cross-check on WI-8's frame
+  ordering, not a tautology: the planning numbers came from the source dataset,
+  these from the store.
+- Empty-`segmentation_map` frames split **63 train / 12 validation** — matching
+  §2's independently measured counts exactly.
+- ⚠ `cyst_fraction` is the least-matched axis (t = 1.86). Under the bar, but
+  the closest to it — worth remembering if a cyst probe ever looks strange.
+
+`scripts/wi10_splits.py` **exits non-zero** if the matching ever stops holding,
+so it doubles as a regression check when the corpus changes.
 
 #### How it was built (kept for whoever rebuilds or extends it)
 
@@ -423,7 +447,7 @@ image.
 
 ## Quick sanity checklist before starting new work
 
-- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 212 passed, 6 skipped
+- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 224 passed, 6 skipped
       (the 6 skips are `test_stanford_mat.py`, which needs `data/rats/*.mat`)
 - [ ] `ruff check .` → clean
 - [x] On a `12g`/`24g` instance: `nvidia-smi` works — confirmed, TITAN RTX
