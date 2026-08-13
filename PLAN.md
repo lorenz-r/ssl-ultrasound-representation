@@ -1618,12 +1618,43 @@ symmetric, and centred at x = 0.
 
 **Policy A (anatomy-focused), in priority order:**
 
-1. **Receive angular-sector subsetting — PRIMARY.** Random sector subset and random K-reduction level. Always available, no PW stack needed, and it is the axis the store is built around.
+1. **Receive angular-sector subsetting — PRIMARY.** Random sector subset and random K-reduction level. **⚠ rev-5: the random K-reduction half of this is now OFF by default and reclassified as an ablation** — see "K-jitter" below. The random *sector subset* remains primary and on. Always available, no PW stack needed, and it is the axis the store is built around.
 2. **Transmit-angle subsetting — SECONDARY.** From the PW(5) stack: the physically exact positive-pair generator (§3.2b), two angles observing identical scatterers. Secondary because its angular leverage is capped at ±10° by grating lobes and because it depends on the stack that is cut candidate #1.
 3. Sector dropout; TGC/gain jitter (random smooth depth-dependent gain); additive complex Gaussian noise at sampled SNR.
 4. *Ablation only, never default:* depth-invariance augmentations (blur, resolution jitter, aggressive TGC randomization) — see §4.5c for why these are off by default.
 
 **Policy B (geometry-only)** as above.
+
+**⚠ K-jitter: off by default (rev-5 decision).** Drawing a random K-reduction
+level per view confounds the K-ablation this store was built to run. §5.2
+WI-13 trains a *separate model per arm* (K ∈ {4,2,1} @128, {16,8} @64) to ask
+whether finer receive angular resolution buys anything; jittering K trains the
+K=4 arm on views coarsened toward K=1, i.e. teaches it to be invariant to
+angular resolution. If that succeeds, the K=4 arm discards precisely what
+distinguishes it from K=1, the ablation reports "K doesn't matter", and the
+finding is an artifact of the augmentation rather than physics. The arms are
+not even augmented comparably — at K=1 the jitter is a no-op, since only one
+level exists.
+
+Policy A loses nothing essential: its priority-1 augmentation is the random
+contiguous *sector subset*, which produces the intended positive pair (two
+receive sub-apertures of the same scatterers) while leaving surviving sectors
+at full angular resolution, so the channel ↔ angle correspondence stays stable.
+Sector dropout, TGC jitter and additive noise are unaffected.
+
+Two secondary reasons: reconciling a drawn k with the encoder's fixed 2K input
+requires repeating surviving sectors back up to K, which produces duplicate
+channels (a blur plus a half-bin angular shift) that no acquisition produces;
+and at k=1 a view carries 1/K the angular information of its partner, an
+aggressive invariance demand for an objective as collapse-prone as VICReg
+(§4.7) in its very first runs.
+
+So it becomes a *measured* question rather than an assumption — exactly how
+§4.5c already treats the depth-invariance augmentations. Run "Policy A +
+k-jitter" as one documented ablation cell in the §5.2 WI-13 matrix. Implemented
+as `LoaderConfig.k_jitter` (default `False`); a middle setting restricting the
+draw to adjacent levels (k ∈ {K, K/2}) bounds the invariance demand if the full
+ladder proves too aggressive.
 
 Crop sampling is **depth-stratified** (uniform in depth, not in area — §4.5c
 measure 1) over the **full 0–40 mm** range for K ≤ 4, and over 8–40 mm for K ≥ 8

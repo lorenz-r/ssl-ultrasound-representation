@@ -14,7 +14,7 @@ full-corpus work was scoped out deliberately, not skipped by accident.
 **Phase 2 (cluster, TITAN RTX `24g`)** did the GPU and full-corpus work:
 WI-4's real-data gate (which had to be *rewritten* — see below) and WI-8's
 full 923-frame build, which now exists at
-`/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr`. **246 tests pass, `ruff
+`/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr`. **249 tests pass, `ruff
 check .` is clean, `pip install -e .` reproduces the environment** — no
 Poetry needed on the cluster; `pyproject.toml` declares its metadata in the
 standard PEP 621 `[project]` table, so plain `pip` builds it correctly
@@ -100,7 +100,7 @@ Every *test* above runs without a GPU or the full corpus — they use synthetic
 data, a small real download (a couple of NVIDIA frames), or the real local
 Stanford `.mat` files in `data/rats/`. ⚠ **`data/rats/` is not present on the
 cluster** (it was local to the phase-1 laptop), so `pytest -q` here reports
-**246 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
+**249 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
 cleanly. Re-download the Stanford `.mat` files before WI-16 work. The two exceptions are the artefacts
 rather than the tests: WI-4's gate numbers and WI-8's 923-frame store were
 both produced on a `24g` GPU instance against the full corpus.
@@ -395,13 +395,22 @@ for x1, x2 in GpuAugmentor(cfg, device="cuda").wrap(loader):
 arms (`K ≤ 4 @ 128` full depth, `K ≥ 8 @ 64` with z ≥ 8 mm) so K and crop size
 cannot drift apart.
 
-**One open question, flagged not decided.** Policy A's *primary* augmentation is
-a random K-reduction, but the encoder's input is a fixed `2K` channels. The
-loader reduces to the drawn k and then repeats surviving sectors back up to the
-arm's K — repeating rather than zero-padding, since zeros would let the model
-read `k` straight off the empty channels (a shortcut instead of invariance).
-Controlled by `LoaderConfig.k_jitter`, default on. PLAN.md does not resolve
-this; confirm before the real runs.
+**K-jitter is OFF by default — decided, not merely defaulted.** Policy A's
+priority-1 augmentation is listed in PLAN.md as "random sector subset *and*
+random K-reduction level". The sector-subset half is on; the K-reduction half
+is off, because enabling it confounds the experiment this store exists for:
+WI-13's K-ablation trains a separate model per arm to ask whether finer receive
+angular resolution helps, and jittering K trains the K=4 arm to be *invariant*
+to angular resolution — discarding exactly what distinguishes it from K=1, so
+the ablation would report "K doesn't matter" as an artifact of the augmentation.
+The arms are not even augmented comparably (at K=1 jitter is a no-op).
+
+Policy A loses nothing essential: the random contiguous sector subset still
+supplies the intended positive pair while leaving surviving sectors at full
+angular resolution. Run "Policy A + k-jitter" as a documented ablation cell
+instead — `LoaderConfig(k_jitter=True)`. Full reasoning in PLAN.md WI-11
+("K-jitter: off by default"); `test_dataset.py` pins the default so a future
+flip has to be deliberate.
 
 ### WI-9 — HuggingFace publication
 
@@ -504,7 +513,7 @@ image.
 
 ## Quick sanity checklist before starting new work
 
-- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 246 passed, 6 skipped
+- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 249 passed, 6 skipped
       (the 6 skips are `test_stanford_mat.py`, which needs `data/rats/*.mat`)
 - [ ] `ruff check .` → clean
 - [x] On a `12g`/`24g` instance: `nvidia-smi` works — confirmed, TITAN RTX

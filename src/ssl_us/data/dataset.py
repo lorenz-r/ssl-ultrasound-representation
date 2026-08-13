@@ -73,11 +73,34 @@ class LoaderConfig:
     cache_frames: int = 64
     seed: int = 0
     frame_ids: list[str] | None = None  # restrict to a split (WI-10)
-    # Policy A's random K-reduction vs the encoder's fixed 2K input width: with
-    # jitter on, each sample draws a level at or below the arm's K and the
-    # surviving sectors are repeated back up to K (repeating, not zero-padding,
-    # so `k` cannot be read off the zero channels). Off pins it to the arm's K.
-    k_jitter: bool = True
+    # Random K-reduction: **off by default, an ablation rather than a default.**
+    #
+    # PLAN.md WI-11 lists it under Policy A's priority-1 augmentation, but
+    # enabling it confounds the very experiment the store exists for. WI-13's
+    # K-ablation trains a separate model per arm (K ∈ {4,2,1} @128, {16,8} @64)
+    # to ask whether finer receive angular resolution buys anything. Jitter
+    # trains the K=4 arm on views coarsened toward K=1 — i.e. explicitly teaches
+    # it to be *invariant to angular resolution*. If that works, the K=4 arm
+    # discards exactly what distinguishes it from K=1, the ablation reports "K
+    # doesn't matter", and that finding is an artifact of the augmentation
+    # rather than physics. The arms are not even augmented comparably: at K=1
+    # jitter is a no-op, since only one level exists.
+    #
+    # Policy A does not need it. Its priority-1 augmentation is the random
+    # contiguous *sector subset*, which gives the intended positive pair (two
+    # receive sub-apertures of the same scatterers) while leaving the surviving
+    # sectors at full angular resolution, so channel ↔ angle stays stable.
+    #
+    # Turning it on is a legitimate ablation ("does angular-resolution
+    # invariance help?"), which is how PLAN.md §4.5c already treats the
+    # depth-invariance augmentations: measured, never assumed. When on, each
+    # sample draws a level ≤ the arm's K and surviving sectors are repeated back
+    # up to K — repeating, not zero-padding, so `k` cannot be read off empty
+    # channels. Note the repeat produces duplicate channels (a blur plus a
+    # half-bin angular shift), and at k=1 a view carries 1/K the angular
+    # information of its partner — an aggressive invariance demand for an
+    # objective as collapse-prone as VICReg (§4.7).
+    k_jitter: bool = False
     policy_a_config: aug.PolicyAConfig | None = None
     policy_b_config: aug.PolicyBConfig | None = None
     label_keys: tuple[str, ...] = field(default_factory=tuple)

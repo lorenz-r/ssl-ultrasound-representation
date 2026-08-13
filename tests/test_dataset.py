@@ -157,3 +157,39 @@ def test_crop_too_large_for_the_depth_range_raises(tiny_store):
     ds = SectorCropDataset(cfg)
     with pytest.raises(ValueError, match="no valid depth range"):
         ds._sample_origin(np.random.default_rng(0))
+
+
+# ── K-jitter is an ablation, not a default ───────────────────────────────────
+
+
+def test_k_jitter_is_off_by_default():
+    """Enabling it confounds WI-13's K-ablation: it trains the K=4 arm to be
+    invariant to coarsening toward K=1, which discards exactly what the
+    ablation is trying to measure. On is a documented ablation, not the
+    default — see the LoaderConfig comment before flipping this."""
+    assert LoaderConfig(store_path="s.zarr", k=4).k_jitter is False
+    assert LoaderConfig.for_arm("s.zarr", k=16).k_jitter is False
+
+
+def test_k_jitter_off_pins_the_ladder_to_the_arm(tiny_store):
+    """With jitter off every sample must sit at the arm's K, so the encoder
+    never sees a coarsened view."""
+    import torch
+
+    from ssl_us.data.dataset import GpuAugmentor
+
+    cfg = LoaderConfig(store_path=tiny_store, k=4, policy="A", k_jitter=False)
+    augmentor = GpuAugmentor(cfg, device="cpu")
+    assert augmentor._acfg.k_choices == (4,)
+
+    sums, occ = next(iter(SectorCropDataset(cfg)))
+    v1, _v2 = augmentor(torch.from_numpy(sums)[None], torch.from_numpy(occ)[None])
+    assert v1.shape[1] == cfg.in_channels == 8
+
+
+def test_k_jitter_on_offers_only_levels_at_or_below_the_arm(tiny_store):
+    """An arm of width K cannot be handed a view with more than K sectors."""
+    from ssl_us.data.dataset import GpuAugmentor
+
+    cfg = LoaderConfig(store_path=tiny_store, k=4, policy="A", k_jitter=True)
+    assert set(GpuAugmentor(cfg, device="cpu")._acfg.k_choices) == {4, 2, 1}
