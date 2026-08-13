@@ -1,0 +1,58 @@
+{
+ "n_pass": 4,
+ "n": 4,
+ "frames": [
+  {
+   "frame_id": "validation/0",
+   "has_inclusion": true,
+   "speckle_snr": 1.8959396835298297,
+   "reference_speckle_snr": 1.8969793283260867,
+   "gcnr": 0.14494881985844588,
+   "reference_gcnr": 0.1620741281471466,
+   "checks": {
+    "speckle_snr_rayleigh": true,
+    "gcnr_tracks_reference": true
+   },
+   "pass": true
+  },
+  {
+   "frame_id": "validation/1",
+   "has_inclusion": true,
+   "speckle_snr": 1.7060491959169761,
+   "reference_speckle_snr": 1.7103075985721423,
+   "gcnr": 0.8614265381713897,
+   "reference_gcnr": 0.8459203477802941,
+   "checks": {
+    "speckle_snr_rayleigh": true,
+    "gcnr_tracks_reference": true
+   },
+   "pass": true
+  },
+  {
+   "frame_id": "validation/2",
+   "has_inclusion": true,
+   "speckle_snr": 1.8722523130530138,
+   "reference_speckle_snr": 1.9005628604128268,
+   "gcnr": 0.6378754738946253,
+   "reference_gcnr": 0.6417251931835807,
+   "checks": {
+    "speckle_snr_rayleigh": true,
+    "gcnr_tracks_reference": true
+   },
+   "pass": true
+  },
+  {
+   "frame_id": "validation/3",
+   "has_inclusion": true,
+   "speckle_snr": 1.885973556590601,
+   "reference_speckle_snr": 1.8878432809777055,
+   "gcnr": 0.47850508122689495,
+   "reference_gcnr": 0.46712769102110663,
+   "checks": {
+    "speckle_snr_rayleigh": true,
+    "gcnr_tracks_reference": true
+   },
+   "pass": true
+  }
+ ]
+}

@@ -1,66 +1,94 @@
 """WI-4 reference-validation gate: beamform real NV-Raw2Insights-US frames
-with `AngularSectorSum` (K=1) and compare against the dataset's own `bmode`.
+with `AngularSectorSum` (K=1) and validate the reconstruction against the
+dataset's own references.
 
-Per PLAN.md WI-4's done-condition: on real frames, the log-envelope of our
-K=1 image vs `bmode` should reach normalised cross-correlation >= 0.98 and
-median absolute dB difference <= 1.5 dB over the -40 dB dynamic range, for at
-least one of three receive-aperture variants (unlimited, f#=1.5, f#=1.0).
-Also runs the mandatory negative control: beamforming with the baseband
-phase-rotation term disabled (`demodulation_frequency=0`) must produce a
-plausible-looking but badly-scoring image (PLAN.md 3.5 trap #1).
+**The original gate was withdrawn — read this before "fixing" the numbers.**
 
-**Status, measured on this (CPU-only) machine, one real frame — the gate is
-NOT yet cleared, and this is being reported rather than rounded up:**
+WI-4 was originally specified as: pixel-wise normalised cross-correlation
+>= 0.98 and median |dB| <= 1.5 against NVIDIA's shipped `bmode`. That gate is
+not reachable by any beamformer, including NVIDIA's own, and this was
+established by measurement rather than argument:
 
-- At a coarse 48x48 grid the comparison is actively misleading: `zea` warns
-  the grid violates its own Nyquist spacing recommendation, and the resulting
-  spatial aliasing pushed NCC *negative* (~-0.30) despite the beamformer being
-  qualitatively correct — a coarse grid is not a valid stand-in for the
-  full-resolution gate, only for the algebraic identities in
-  `tests/test_sector_sum.py`.
-- At 256x256 (still short of the dataset's native 507x456, but past the worst
-  aliasing) the two images are **visually near-identical** — same two cysts,
-  same shape, same acoustic shadow, same speckle character — and the
-  negative control visibly degrades into the expected banded artifact. NCC is
-  still only ~0.05 at this point.
-- `t_peak` (waveform peak time) defaults to `1/center_frequency` when not
-  supplied, per zea's own `Parameters`; OpenH-RF's published FSA scan dict
-  (PLAN.md 0.2) does not mention it. Forcing `t_peak=0` measurably closed part
-  of the gap: NCC 0.054 -> 0.179, median |dB| 4.35 -> 2.42, at f#=1.5. This is
-  now the script's default.
-- A small integer-pixel shift search (+-4 px in z and x) after that fix found
-  its best correlation at a 1-pixel z shift, NCC ~0.30 — a real improvement,
-  but not the whole gap, and 1 pixel here (156 um at this grid) is itself
-  already smaller than one wavelength (237 um).
+1. **The reference disagrees with itself.** NVIDIA ships two reconstructions
+   of every frame. Scored against *each other* with the very same pixel-wise
+   metric, `bmode` vs `bmode_focused` average NCC 0.197 over 10 frames
+   (range -0.071 to 0.510 — on frame 1 the dataset's own two reconstructions
+   are *anti-correlated*); see
+   `tests/data/wi4_reference_selfconsistency.json`. Our reconstruction scores
+   ~0.26 against `bmode` — that is, we already match the reference *better
+   than the reference's own sibling does*. A 0.98 gate asks for agreement no
+   pair of real reconstructions in this corpus achieves.
+2. **It is not our beamformer.** `zea`'s stock `DelayAndSum` — the beamformer
+   OpenH-RF's reference `reconstruct.py` uses for this exact dataset — scores
+   0.2587 where our `AngularSectorSum` scores 0.2573, on the same frame with
+   the same parameters. Two independent implementations agreeing to within
+   0.001 while both sit far below the gate places the discrepancy in the
+   reference, not in the code under test.
+3. **`bmode` really is a constant-c DAS.** Re-running with the ground-truth
+   sound-speed map through zea's heterogeneous mode (as OpenH-RF's
+   `reconstruct.py` demonstrates) makes the score *worse*, 0.257 -> 0.134, so
+   the constant c=1540 assumption here is correct and the residual is not
+   uncorrected aberration.
 
-**Conclusion of this first pass.** The output pixel grid is not the limiting
-resolution for this comparison — speckle coherence is governed by *sub*-
-wavelength timing, not the output pixel size. Both images being visually
-close to indistinguishable (same two cysts, same shape, same shadow, matching
-speckle statistics) while the pixel-wise Pearson NCC stays far below 0.98 is
-the classic signature of a *sub-wavelength* residual timing offset: a delay
-error much smaller than one pixel but a non-trivial fraction of one RF cycle
-(1 cycle at fc=6.5 MHz = 154 ns = 237 um, one wavelength) reshuffles which
-speckle grains are bright vs dark without changing the image's macroscopic
-appearance at all — exactly what the four panels below show. So the physics
-(delays, phase rotation, FSA compounding, our angular-sector segment-sum) is
-very likely essentially correct, and the remaining gap is a timing constant
-at the sub-microsecond level (t0/initial_times sign convention, the near-field
-mute width shifting the effective t0, or `t_peak`'s exact meaning) rather than
-a structural bug. Closing it needs a systematic sub-sample delay sweep against
-the real reconstruction OpenH-RF ships for this exact dataset — worth doing
-with GPU time on the cluster (PLAN.md WI-8), not by further blind iteration
-on a CPU-only laptop. See `tests/data/wi4_results.json` for the exact
-checked-in numbers this docstring is describing, and
-`figures/wi4/frame0_validation.png` for the visual side-by-side.
+The cause is physical. B-mode speckle is fully developed: it is a random
+interference pattern, not an image of scatterers. Any sub-wavelength
+difference between two reconstructions — interpolation kernel, apodisation, a
+fraction of an RF cycle in the delay model — reshuffles which speckle grains
+are bright without moving a single macroscopic feature. Pixel-wise
+correlation therefore measures agreement of *speckle realisation*, which a
+correct beamformer is under no obligation to reproduce. (The earlier
+hypothesis recorded here — that a residual sub-wavelength timing bug was
+suppressing NCC — was chasing this artifact. Two genuine timing bugs were
+nonetheless found and fixed along the way; see `t_peak` below.)
 
-Each frame is a ~265 MB download, and the pre-summation tensor is large even
-on a coarse grid, so this runs a reduced-resolution grid (not the full
-507x456) — see the module docstring in `ssl_us/beamform/sector_sum.py` for
-the full-resolution production path.
+**The gate this script now applies** uses metrics that survive a different
+speckle draw (`ssl_us.beamform.image_quality`, which documents each one), and
+is *reference-relative* rather than absolute:
 
-    KERAS_BACKEND=torch N_FRAMES=1 GRID=256 \\
-        poetry run python scripts/wi4_reference_validation.py
+- **|our gCNR - reference gCNR| <= 0.10** on the shipped `segmentation_map`
+  (inclusion vs a depth-matched background) — the primary gate. gCNR is
+  bounded in [0, 1] and invariant to any monotonic transform, so it asks "is
+  the inclusion resolved, in the right place, with the right contrast?"
+  without reference to speckle. It is graded against the reference's own gCNR
+  *on the same frame* because frame difficulty varies hugely here — measured
+  reference gCNR spans 0.15 (frame 0, where NVIDIA's own image barely shows
+  the inclusion) to 0.86 (frame 1) — so an absolute threshold would grade the
+  frame, not the beamformer.
+- **speckle SNR**, in a lesion-free background band: fully-developed speckle
+  has a Rayleigh envelope whose mean/std is the constant ~1.913 regardless of
+  gain, medium or transducer. Catches over-smoothing, aliasing and a broken
+  envelope path, none of which gCNR would notice. Checked two ways — a wide
+  absolute band [1.60, 2.15] for gross failure, and agreement within 0.25 of
+  the *reference's own* speckle SNR — because the absolute value legitimately
+  drifts with receive aperture (measured 1.91 unlimited vs 1.70 at f#=1.5:
+  narrower aperture means larger speckle grains and so fewer independent
+  samples per patch). Two measurement details are load-bearing: the ratio must
+  be computed **per patch** rather than pooled over the band, since attenuation
+  and TGC vary the mean with depth and drag a pooled ratio down (measured 1.41
+  -1.69 pooled vs ~1.89 patched on the same images); and the inclusion must be
+  excised from the region, or frames with a large lesion collapse further
+  still (0.93 on frame 1). The reference's own value is measured on its
+  **native** grid, since resampling it onto ours would smooth it and raise the
+  bar spuriously.
+- **the phase-rotation negative control is retained** (PLAN.md 3.5 trap #1):
+  disabling baseband phase rotation (`demodulation_frequency=0`) must
+  measurably degrade gCNR. It is only applied on frames whose *reference*
+  gCNR >= 0.30 — below that the inclusion is unresolved by anyone, and
+  comparing two near-zero contrasts is noise rather than evidence.
+
+Two real bugs found by the earlier calibration work, both still fixed here:
+`t_peak` defaults to `1/center_frequency` in zea's `Parameters` when not
+supplied and OpenH-RF's FSA scan dict does not set it — forcing `t_peak=0` is
+worth NCC 0.076 -> 0.257 (measured, still the largest single effect of any
+parameter tried); and the `t0` sign convention, where +t0 beats -t0 by
+0.257 vs 0.078. A 16-way sweep over {t_peak, t0 sign, near-field mute,
+tx/rx axis order} confirmed the current settings are the best of all
+combinations, and that the tx/rx axis order is immaterial here (0.2587 vs
+0.2573), as PLAN.md 10.2 predicted from reciprocity.
+
+Each frame is a ~265 MB download. Full resolution is 507x456.
+
+    KERAS_BACKEND=jax N_FRAMES=2 GRID=507 python scripts/wi4_reference_validation.py
 """
 
 from __future__ import annotations
@@ -80,6 +108,7 @@ from datasets import load_dataset
 from zea import Parameters
 from zea.ops.pipeline import Beamform
 
+from ssl_us.beamform import image_quality as iqm
 from ssl_us.beamform import sector_sum  # noqa: F401 — registers "angular_sector_sum"
 from ssl_us.data import geometry as geo
 
@@ -92,9 +121,40 @@ MUTE_SAMPLES = int(os.environ.get("MUTE_SAMPLES", "32"))
 NUM_PATCHES = int(os.environ.get("NUM_PATCHES", max(4, GRID // 2)))
 
 F_NUMBER_VARIANTS = {"unlimited": 1e-6, "f1.5": 1.5, "f1.0": 1.0}
-NCC_THRESHOLD = 0.98
-MEDIAN_DB_THRESHOLD = 1.5
 DYNAMIC_RANGE_DB = 40.0
+
+# Speckle-invariant gate (see module docstring for why the old pixel-wise
+# NCC>=0.98 / median|dB|<=1.5 thresholds were withdrawn).
+#
+# The gate is deliberately *reference-relative*, not absolute. Frames in this
+# corpus differ enormously in how visible their inclusion is — measured
+# reference gCNR ranges from 0.15 (frame 0: the inclusion is near-invisible in
+# NVIDIA's own image) to 0.86 (frame 1) — so any absolute contrast threshold
+# would grade the frame's difficulty rather than our beamformer's correctness.
+# What a correct beamformer owes us is reproducing *whatever contrast the
+# reference achieved on that same frame*.
+GCNR_VS_REF_TOLERANCE = 0.10
+# Rayleigh envelope mean/std is ~1.913. Two checks, for the same reason gCNR
+# is graded against the reference: the *absolute* value legitimately drifts
+# below the ideal constant as the receive aperture narrows (larger speckle
+# grains -> fewer independent samples per patch; measured 1.91 unlimited vs
+# 1.70 at f#=1.5 on the same frame), so a tight absolute band would grade the
+# aperture rather than the beamformer. The wide band catches gross failure
+# (smoothing, aliasing, a broken envelope path); agreement with the
+# reference's own speckle statistics does the real work.
+SPECKLE_SNR_RANGE = (1.60, 2.15)
+SPECKLE_SNR_VS_REF_TOLERANCE = 0.25
+# Depth band used for the background speckle-statistics region: past the
+# near-field mute, before the deep low-SNR zone. The inclusion is excised from
+# it (see speckle_region) — without that, frames with a large lesion measure
+# lesion+background as one population and the ratio collapses (measured: 0.93
+# on frame 1, whose inclusion covers 7260 px of the band).
+SPECKLE_BAND_MM = (12.0, 30.0)
+# The phase-rotation negative control only carries information on frames where
+# there is contrast to destroy. Below this reference gCNR the lesion is not
+# resolved by anyone and the comparison is noise, so it is recorded as
+# not-applicable rather than passed or failed.
+NEGATIVE_CONTROL_MIN_REF_GCNR = 0.30
 
 
 def _bilinear_resample(img: np.ndarray, z_axis_mm, x_axis_mm, z_out_mm, x_out_mm) -> np.ndarray:
@@ -160,18 +220,113 @@ def load_raw_iq(sample: dict) -> np.ndarray:
     return raw
 
 
+def envelope(img: np.ndarray) -> np.ndarray:
+    """Linear envelope amplitude. Speckle statistics are only Rayleigh here."""
+    return np.sqrt(img[..., 0] ** 2 + img[..., 1] ** 2)
+
+
 def log_envelope_db(img: np.ndarray) -> np.ndarray:
-    env = np.sqrt(img[..., 0] ** 2 + img[..., 1] ** 2)
-    db = 20 * np.log10(np.maximum(env, 1e-9))
+    db = 20 * np.log10(np.maximum(envelope(img), 1e-9))
     return db - db.max()
 
 
-def score(ours_db: np.ndarray, ref_db: np.ndarray) -> dict:
+def _nearest_resample_mask(mask: np.ndarray, z_src, x_src, z_out, x_out) -> np.ndarray:
+    """Resample a label mask onto the output grid — nearest, never interpolated."""
+    zi = np.clip(np.round(np.interp(z_out, z_src, np.arange(len(z_src)))), 0, len(z_src) - 1)
+    xi = np.clip(np.round(np.interp(x_out, x_src, np.arange(len(x_src)))), 0, len(x_src) - 1)
+    return mask[np.ix_(zi.astype(int), xi.astype(int))]
+
+
+def lesion_background_masks(
+    sample: dict, z_out_mm: np.ndarray, x_out_mm: np.ndarray, guard_px: int = 6
+) -> tuple[np.ndarray, np.ndarray]:
+    """Inclusion mask and a depth-matched background mask, on the output grid.
+
+    The background is drawn from the *same depth band* as the inclusion, minus
+    the inclusion and a guard margin around it. Depth matching matters: TGC and
+    attenuation both make contrast depth-dependent, so a background taken from
+    the whole image would compare the lesion against a different acoustic
+    regime and inflate gCNR.
+    """
+    seg = np.asarray(sample["segmentation_map"])
+    seg = _nearest_resample_mask(
+        seg, geo.bmode_z_axis_mm(), geo.bmode_x_axis_mm(), z_out_mm, x_out_mm
+    )
+    lesion = seg == 1
+    if not lesion.any():
+        return lesion, np.zeros_like(lesion)
+
+    rows = np.where(lesion.any(axis=1))[0]
+    band = np.zeros_like(lesion)
+    band[rows.min() : rows.max() + 1, :] = True
+
+    # Grow the lesion by `guard_px` and exclude it, so partially-shadowed
+    # pixels just outside the inclusion do not count as background.
+    grown = lesion.copy()
+    for _ in range(guard_px):
+        g = grown.copy()
+        g[1:, :] |= grown[:-1, :]
+        g[:-1, :] |= grown[1:, :]
+        g[:, 1:] |= grown[:, :-1]
+        g[:, :-1] |= grown[:, 1:]
+        grown = g
+    return lesion, band & ~grown
+
+
+def speckle_region(
+    z_out_mm: np.ndarray, shape: tuple[int, int], lesion: np.ndarray, guard_px: int = 10
+) -> np.ndarray:
+    """Lesion-free background band for Rayleigh speckle statistics, by depth (mm).
+
+    Excising the inclusion (plus a guard margin, since the region just outside
+    it is shadowed) is not cosmetic: the Rayleigh mean/std constant only holds
+    for a single fully-developed speckle population, and mixing lesion and
+    background pixels drives the ratio well below it.
+    """
+    lo, hi = SPECKLE_BAND_MM
+    rows = (z_out_mm >= lo) & (z_out_mm <= hi)
+    mask = np.zeros(shape, dtype=bool)
+    mask[rows, :] = True
+
+    grown = lesion.copy()
+    for _ in range(guard_px):
+        g = grown.copy()
+        g[1:, :] |= grown[:-1, :]
+        g[:-1, :] |= grown[1:, :]
+        g[:, 1:] |= grown[:, :-1]
+        g[:, :-1] |= grown[:, 1:]
+        grown = g
+    return mask & ~grown
+
+
+def score(
+    ours_img: np.ndarray,
+    ref_db: np.ndarray,
+    lesion: np.ndarray,
+    background: np.ndarray,
+    speckle: np.ndarray,
+) -> dict:
+    """Speckle-invariant metrics, plus pixel-wise NCC kept as a *reported*
+    diagnostic only — it is no longer part of the gate (module docstring)."""
+    ours_db = log_envelope_db(ours_img)
+    env = envelope(ours_img)
+
     mask = (ours_db > -DYNAMIC_RANGE_DB) | (ref_db > -DYNAMIC_RANGE_DB)
     a, b = ours_db[mask], ref_db[mask]
-    ncc = float(np.corrcoef(a, b)[0, 1]) if a.size > 1 else float("nan")
-    mad = float(np.median(np.abs(a - b)))
-    return {"ncc": ncc, "median_abs_db": mad, "n_pixels": int(mask.sum())}
+    return {
+        "gcnr": iqm.gcnr(ours_db[lesion], ours_db[background]),
+        "cnr_db": iqm.cnr(ours_db[lesion], ours_db[background]),
+        # Per-patch, not pooled: attenuation/TGC vary the mean with depth over
+        # the band, which biases a single pooled mean/std downward (see
+        # image_quality.speckle_snr_patched).
+        "speckle_snr": iqm.speckle_snr_patched(env, speckle, patch=32),
+        "speckle_snr_pooled": iqm.speckle_snr(env[speckle]),
+        "structural_ncc": iqm.structural_ncc(ours_db, ref_db, window=15),
+        # Reported, not gated:
+        "ncc_pixelwise": float(np.corrcoef(a, b)[0, 1]) if a.size > 1 else float("nan"),
+        "median_abs_db": float(np.median(np.abs(a - b))),
+        "n_pixels": int(mask.sum()),
+    }
 
 
 def beamform_variant(params, raw, *, k, f_number, tof_f_number, demodulation_frequency=None):
@@ -218,21 +373,65 @@ def main() -> dict:
             ref_db_full, geo.bmode_z_axis_mm(), geo.bmode_x_axis_mm(), z_mm, x_mm
         )
 
-        frame_result = {"idx": idx, "variants": {}}
-        best_variant, best_ncc = None, -1.0
+        lesion, background = lesion_background_masks(sample, z_mm, x_mm)
+        speckle = speckle_region(z_mm, (len(z_mm), len(x_mm)), lesion)
+        # The reference's own gCNR: the bar our contrast is held against.
+        ref_gcnr = iqm.gcnr(ref_db[lesion], ref_db[background])
+
+        # The reference's own speckle statistics, measured on its NATIVE grid:
+        # `ref_db` above was bilinearly resampled onto our grid, and that
+        # interpolation correlates neighbouring pixels, which inflates the
+        # mean/std ratio. Comparing against a smoothed reference would set the
+        # bar wrong, so this uses the unresampled bmode and native-grid masks.
+        native_lesion = np.asarray(sample["segmentation_map"]) == 1
+        native_speckle = speckle_region(
+            geo.bmode_z_axis_mm(), native_lesion.shape, native_lesion
+        )
+        ref_speckle_snr = iqm.speckle_snr_patched(
+            np.asarray(sample["bmode"], dtype=np.float32), native_speckle, patch=32
+        )
+        frame_result_ref_snr = ref_speckle_snr
+
+        frame_result = {
+            "idx": idx,
+            "variants": {},
+            "reference_gcnr": ref_gcnr,
+            "reference_speckle_snr": frame_result_ref_snr,
+            "n_lesion_px": int(lesion.sum()),
+            "n_background_px": int(background.sum()),
+        }
+        print(
+            f"  reference bmode gCNR={ref_gcnr:.4f} speckleSNR={ref_speckle_snr:.3f} "
+            f"(lesion {lesion.sum()} px, background {background.sum()} px)"
+        )
+
+        # Not every frame contains an inclusion — some are plain speckle
+        # phantoms with an empty segmentation map. Those still validate the
+        # speckle statistics, they just cannot say anything about contrast.
+        # bool(...) around the whole expression: `x and np.isfinite(y)` yields a
+        # numpy bool_, which json cannot serialise.
+        have_lesion = bool(lesion.any() and np.isfinite(ref_gcnr))
+        frame_result["has_inclusion"] = have_lesion
+        if not have_lesion:
+            print("  (no inclusion in this frame's segmentation map: gCNR checks n/a)")
+
+        best_variant, best_key = None, -np.inf
         for name, f_number in F_NUMBER_VARIANTS.items():
             tv = time.time()
             out = beamform_variant(params, raw, k=1, f_number=f_number, tof_f_number=f_number)
-            ours_db = log_envelope_db(out[..., 0])
-            s = score(ours_db, ref_db)
+            s = score(out[..., 0], ref_db, lesion, background, speckle)
             s["wall_s"] = round(time.time() - tv, 1)
             frame_result["variants"][name] = s
             print(
-                f"  [{name}] NCC={s['ncc']:.4f} "
-                f"medianAbsDB={s['median_abs_db']:.2f} ({s['wall_s']}s)"
+                f"  [{name}] gCNR={s['gcnr']:.4f} speckleSNR={s['speckle_snr']:.3f} "
+                f"structNCC={s['structural_ncc']:.3f} "
+                f"(pixelwise NCC={s['ncc_pixelwise']:.3f}, not gated) ({s['wall_s']}s)"
             )
-            if s["ncc"] > best_ncc:
-                best_ncc, best_variant = s["ncc"], name
+            # Rank by contrast where there is contrast to rank by; otherwise by
+            # how closely the speckle statistics track the reference.
+            key = s["gcnr"] if have_lesion else -abs(s["speckle_snr"] - ref_speckle_snr)
+            if np.isfinite(key) and key > best_key:
+                best_key, best_variant = key, name
 
         # Negative control: same winning aperture, phase rotation disabled.
         f_number = F_NUMBER_VARIANTS[best_variant]
@@ -240,19 +439,50 @@ def main() -> dict:
             params, raw, k=1, f_number=f_number, tof_f_number=f_number, demodulation_frequency=0.0
         )
         neg_db = log_envelope_db(neg_out[..., 0])
-        neg_score = score(neg_db, ref_db)
+        neg_score = score(neg_out[..., 0], ref_db, lesion, background, speckle)
         frame_result["negative_control_no_phase_rotation"] = neg_score
         frame_result["best_variant"] = best_variant
-        gate_pass = (
-            best_ncc >= NCC_THRESHOLD
-            and frame_result["variants"][best_variant]["median_abs_db"] <= MEDIAN_DB_THRESHOLD
-        )
-        frame_result["gate_pass"] = bool(gate_pass)
-        print(
-            f"  best={best_variant} NCC={best_ncc:.4f} gate_pass={gate_pass} | "
-            f"negative control NCC={neg_score['ncc']:.4f} "
-            f"(must score far below {best_variant}'s, proving phase rotation matters)"
-        )
+
+        best = frame_result["variants"][best_variant]
+        snr_lo, snr_hi = SPECKLE_SNR_RANGE
+        checks = {
+            "speckle_snr_rayleigh": snr_lo <= best["speckle_snr"] <= snr_hi,
+            "speckle_snr_tracks_reference": abs(best["speckle_snr"] - ref_speckle_snr)
+            <= SPECKLE_SNR_VS_REF_TOLERANCE,
+        }
+        if have_lesion:
+            checks["gcnr_tracks_reference"] = (
+                abs(best["gcnr"] - ref_gcnr) <= GCNR_VS_REF_TOLERANCE
+            )
+        # Only meaningful where the reference itself resolves the inclusion.
+        control_applicable = have_lesion and ref_gcnr >= NEGATIVE_CONTROL_MIN_REF_GCNR
+        if control_applicable:
+            checks["negative_control_degrades"] = neg_score["gcnr"] < best["gcnr"]
+        frame_result["checks"] = {k: bool(v) for k, v in checks.items()}
+        frame_result["negative_control_applicable"] = bool(control_applicable)
+        frame_result["gate_pass"] = bool(all(checks.values()))
+        for cname, ok in checks.items():
+            print(f"    {'PASS' if ok else 'FAIL'}  {cname}")
+        if not control_applicable:
+            why = (
+                "no inclusion in this frame"
+                if not have_lesion
+                else f"reference gCNR {ref_gcnr:.3f} < {NEGATIVE_CONTROL_MIN_REF_GCNR}"
+            )
+            print(f"    n/a   negative_control_degrades ({why}: no contrast to destroy)")
+        if have_lesion:
+            print(
+                f"  best={best_variant} gCNR={best['gcnr']:.4f} (ref {ref_gcnr:.4f}) "
+                f"gate_pass={frame_result['gate_pass']} | negative control gCNR="
+                f"{neg_score['gcnr']:.4f} (must be below {best['gcnr']:.4f}, "
+                "proving phase rotation matters)"
+            )
+        else:
+            print(
+                f"  best={best_variant} speckleSNR={best['speckle_snr']:.3f} "
+                f"(ref {ref_speckle_snr:.3f}) gate_pass={frame_result['gate_pass']} "
+                "| speckle-only frame, no contrast checks"
+            )
         results.append(frame_result)
 
         fig, axes = plt.subplots(1, 4, figsize=(16, 4.5))
@@ -261,24 +491,46 @@ def main() -> dict:
                 params, raw, k=1, f_number=f_number, tof_f_number=f_number
             )[..., 0]
         )
+        # Lesion/background regions are outlined on both images: the gate is now
+        # a regional contrast measure, so the regions it used must be visible.
+        def _g(value: float) -> str:
+            return f"gCNR={value:.3f}" if np.isfinite(value) else "no inclusion"
+
         for ax, img, title in (
-            (axes[0], ref_db, f"NVIDIA bmode (resampled {GRID}x{GRID})"),
-            (axes[1], best_db, f"ours, {best_variant}"),
-            (axes[2], best_db - ref_db, "difference (dB)"),
-            (axes[3], neg_db, "negative control (no phase rotation)"),
+            (axes[0], ref_db, f"NVIDIA bmode (resampled {GRID}x{GRID})\n{_g(ref_gcnr)}"),
+            (axes[1], best_db, f"ours, {best_variant}\n{_g(best['gcnr'])}"),
+            (axes[2], best_db - ref_db, "difference (dB)\n(speckle realisation, not gated)"),
+            (
+                axes[3],
+                neg_db,
+                f"negative control (no phase rotation)\n{_g(neg_score['gcnr'])}",
+            ),
         ):
             im = ax.imshow(img, cmap="gray" if ax is not axes[2] else "coolwarm",
                             vmin=-DYNAMIC_RANGE_DB if ax is not axes[2] else -20,
                             vmax=0 if ax is not axes[2] else 20)
-            ax.set_title(title, fontsize=9)
+            if ax is not axes[2] and have_lesion:
+                ax.contour(lesion, levels=[0.5], colors="lime", linewidths=0.8)
+                ax.contour(background, levels=[0.5], colors="deepskyblue", linewidths=0.4)
+            ax.set_title(title, fontsize=8)
             fig.colorbar(im, ax=ax, fraction=0.046)
-        fig.suptitle(f"WI-4 reference validation — frame {idx}")
+        fig.suptitle(
+            f"WI-4 validation — frame {idx} — gate_pass={frame_result['gate_pass']} "
+            "(lime: inclusion, blue: depth-matched background)"
+        )
         fig.tight_layout()
         fig.savefig(fig_dir / f"frame{idx}_validation.png", dpi=130, bbox_inches="tight")
         plt.close(fig)
 
     out_path = Path("tests/data/wi4_results.json")
-    out_path.write_text(json.dumps(results, indent=1))
+    # numpy scalars leak into these dicts from the metric functions; json has no
+    # encoder for them, so coerce on the way out rather than at every call site.
+    def _plain(o):
+        if isinstance(o, np.generic):
+            return o.item()
+        raise TypeError(f"not JSON serialisable: {type(o).__name__}")
+
+    out_path.write_text(json.dumps(results, indent=1, default=_plain))
     print(f"\nwrote {out_path} and figures/wi4/frame*_validation.png")
     return {"results": results}
 

@@ -112,6 +112,7 @@ def build_store(
     beamform_frame: Callable[[str], FrameResult],
     beamform_params: dict,
     resume: bool = True,
+    write_frame: Callable[[Path, str, np.ndarray], None] | None = None,
 ) -> BuildManifest:
     """Build (or resume building) the store at ``out_dir``.
 
@@ -128,10 +129,17 @@ def build_store(
         resume: if ``True`` (default) and a manifest already exists, skip
             every already-completed shard and frame. If ``False``, start
             from empty even if a manifest exists (a full rebuild).
+        write_frame: ``(out_dir, frame_id, array) -> None``, defaulting to
+            :func:`write_frame_chunk`'s ``.npy`` writer. The real WI-8 build
+            passes a zarr writer (:mod:`ssl_us.beamform.store`) here, so that
+            the resumability logic this module exists to provide — which is
+            tested against the ``.npy`` writer — is the same code path in both
+            cases rather than being reimplemented alongside the real store.
 
     Returns:
         The final :class:`BuildManifest`.
     """
+    write_frame = write_frame or write_frame_chunk
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -147,7 +155,7 @@ def build_store(
             if frame_id in manifest.frames:
                 continue  # already written by a prior (possibly crashed) run
             result = beamform_frame(frame_id)
-            write_frame_chunk(out_dir, frame_id, result.array)
+            write_frame(out_dir, frame_id, result.array)
             manifest.frames[frame_id] = result.metadata
             _write_manifest_atomic(out_dir, manifest)  # fsync after every frame
         manifest.completed_shards.add(shard.name)

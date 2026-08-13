@@ -10,3 +10,7 @@ checkpoints/
 artifacts/
 .env
 .venv-zea/
+
+# Beamformed K-sector stores (WI-8) — 24 GB, rebuilt by scripts/wi8_build.py
+*.zarr/
+*.zarr.build/
