@@ -45,9 +45,15 @@ def reduce_ladder(values: np.ndarray, target_k: int, axis: int = -1) -> np.ndarr
     if target_k > k:
         raise ValueError(f"target_k ({target_k}) cannot exceed the current K ({k})")
 
+    # One grouped sum rather than a halving loop. Uniform binning means the
+    # ladder just partitions the sector axis into `target_k` contiguous groups
+    # of `k // target_k` — the same grouping the loop produces — so the whole
+    # descent is a single reshape-and-sum that touches each input element once
+    # instead of once per rung. This runs per crop in the WI-12 loader, where
+    # it was measured as ~49% of loader time before the change.
     out = values
-    while out.shape[-1] > target_k:
-        out = out.reshape(*out.shape[:-1], out.shape[-1] // 2, 2).sum(axis=-1)
+    if k != target_k:
+        out = values.reshape(*values.shape[:-1], target_k, k // target_k).sum(axis=-1)
     return np.moveaxis(out, -1, axis)
 
 
