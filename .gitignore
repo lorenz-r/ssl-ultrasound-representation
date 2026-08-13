@@ -1,4 +1,4 @@
-data/
+/data/
 figures/
 scripts/matlab_scripts
 __pycache__/
@@ -9,3 +9,4 @@ wandb/
 checkpoints/
 artifacts/
 .env
+.venv-zea/

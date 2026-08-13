@@ -1,6 +1,6 @@
 [project]
 name = "ssl-ultrasound-representation"
-version = "0.1.0"
+version = "0.2.0"
 description = "Self-supervised latent space learning for ultrasound image representation"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,16 +13,49 @@ dependencies = [
   "numcodecs (<0.16)",
   "tqdm (>=4.68.1,<5.0.0)",
   "huggingface-hub (>=0.20)",
-  # PyTorch 2.4.1+cu118: last build with Pascal (sm_61) kernels (e.g. TITAN Xp).
-  # Install via: pip install torch==2.4.1+cu118 --index-url https://download.pytorch.org/whl/cu118
-  "torch (>=2.4.1,<2.5)",
+  "datasets (>=3.0)",
+  "pyarrow (>=15.0)",
+  # Was pinned to <2.5+cu118 for Pascal (sm_61) kernels (e.g. TITAN Xp), which
+  # blocked the 4090's preferred builds. No sm_61 hardware is targeted by this
+  # phase of the project — unpinned to the CUDA 12.4+ builds instead.
+  # Install a CUDA build via: pip install torch --index-url https://download.pytorch.org/whl/cu124
+  "torch (>=2.6)",
+  "torchvision (>=0.21)",
   "wandb (>=0.27.2,<0.28.0)",
   "scikit-learn (>=1.9.0,<2.0.0)",
+  "scikit-image (>=0.24)",
+  "umap-learn (>=0.5)",
+  "transformers (>=4.45)",
+  # Offline beamforming (src/ssl_us/beamform, WI-3/4/16) is meant to run in a
+  # separate virtualenv (KERAS_BACKEND=jax) per PLAN.md 0.6/0.8, to keep
+  # keras+JAX-CUDA away from torch-CUDA. It is declared here too, pinned
+  # exactly per 0.7, so the same environment can be used for local dev/CPU
+  # testing on machines (this one included) that never run the CUDA build of
+  # either.
+  "zea (==0.1.4)",
 ]
 
-[tool.poetry]
-packages = [{ include = "ssl_ultrasound_representation", from = "src" }]
+[project.optional-dependencies]
+dev = ["pytest (>=8.0)", "ruff (>=0.7)"]
 
+[tool.poetry]
+packages = [{ include = "ssl_us", from = "src" }]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# One-off measurement script (PLAN.md WI-0); deliberately dense so the
+# per-frame instrumentation reads as one block. Already run and its output
+# checked into tests/data/wi0_results.json — not touched for style.
+"scripts/wi0_probe.py" = ["E401", "E501", "E701", "E702", "E741", "I001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [build-system]
 requires = ["poetry-core"]

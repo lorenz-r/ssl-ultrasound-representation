@@ -4,10 +4,19 @@ numpy>=1.24
 pymust>=0.1.9,<0.2.0
 zarr>=2.18,<3
 numcodecs>=0.13,<0.16
-tqdm>=4.65
+tqdm>=4.68.1
 huggingface_hub>=0.20
-# PyTorch 2.4.1+cu118 is the last build that includes Pascal (sm_61) kernels
-# (e.g. TITAN Xp). PyTorch 2.5+ with CUDA 12.x/13.x dropped sm_61 support.
---extra-index-url https://download.pytorch.org/whl/cu118
-torch==2.4.1+cu118
+datasets>=3.0
+pyarrow>=15.0
+# No longer pinned to <2.5+cu118 (that pin existed for Pascal sm_61 kernels,
+# e.g. TITAN Xp, which this phase of the project does not target).
+# For a CUDA build: pip install torch --index-url https://download.pytorch.org/whl/cu124
+torch>=2.6
+torchvision>=0.21
 wandb>=0.27,<0.28
+scikit-learn>=1.9,<2.0
+scikit-image>=0.24
+umap-learn>=0.5
+transformers>=4.45
+# Offline beamforming (src/ssl_us/beamform) — pinned exactly, see PLAN.md 0.7.
+zea==0.1.4

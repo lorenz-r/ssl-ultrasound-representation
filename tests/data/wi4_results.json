@@ -1,0 +1,32 @@
+[
+ {
+  "idx": 0,
+  "variants": {
+   "unlimited": {
+    "ncc": 0.0404421755054199,
+    "median_abs_db": 3.9586317156976634,
+    "n_pixels": 64483,
+    "wall_s": 46.8
+   },
+   "f1.5": {
+    "ncc": 0.1791277220865721,
+    "median_abs_db": 2.416153998633355,
+    "n_pixels": 62116,
+    "wall_s": 47.2
+   },
+   "f1.0": {
+    "ncc": 0.19260548160221283,
+    "median_abs_db": 2.3772116061587063,
+    "n_pixels": 62508,
+    "wall_s": 48.4
+   }
+  },
+  "negative_control_no_phase_rotation": {
+   "ncc": 0.017423909884240196,
+   "median_abs_db": 11.618463826426833,
+   "n_pixels": 64697
+  },
+  "best_variant": "f1.0",
+  "gate_pass": false
+ }
+]

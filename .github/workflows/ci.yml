@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # zea (WI-3/4/16, offline beamforming) picks a Keras backend at import time
+  # and defaults to tensorflow, which is not installed here — torch already
+  # is (it's the training dependency), so reuse it rather than adding a
+  # second deep-learning framework just to satisfy the import.
+  KERAS_BACKEND: torch
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install dependencies
+        run: poetry install -E dev
+
+      - name: Lint
+        run: poetry run ruff check .
+
+      - name: Test (smoke tier — no full-dataset downloads)
+        run: poetry run pytest -q
