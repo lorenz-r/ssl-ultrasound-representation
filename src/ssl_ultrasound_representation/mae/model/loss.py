@@ -75,6 +75,41 @@ def _phase_per_patch(pred, target):
     return (1.0 - cos_diff).mean(dim=-1)
 
 
+def _correlation_per_patch(pred, target, eps: float = 1e-8):
+    """1 − Re(ρ) per patch, ρ = complex correlation of the mean-removed IQ.
+
+    The direct surrogate for `eval.metrics.complex_corr_coeff`. Unlike mse this
+    is scale-invariant, which matters for two reasons:
+
+    * mse's optimum under uncertainty is the conditional mean, which shrinks
+      toward zero on unpredictable speckle — predicting nothing scores mse 1.0
+      but ρ 0. Correlation gives no reward for that hedge.
+    * dmse/dρ = −2ρ vanishes as ρ → 0, so mse barely rewards early correlation
+      gains; d(1−ρ)/dρ is a constant −1 all the way up.
+
+    Uses Re(ρ) rather than |ρ| deliberately: |ρ| is invariant to a per-patch
+    phase rotation, so a model could score perfectly while every patch carried
+    its own phase offset. Re(ρ) is maximal only when the bulk phase is also
+    right, and it still upper-bounds |ρ| (the reported metric).
+
+    Range [0, 2]; 0 is a perfect match, 1.0 is an uncorrelated prediction.
+    """
+    I_p, Q_p = _split_iq(pred)
+    I_t, Q_t = _split_iq(target)
+    # Mean-removed per patch, matching eval.metrics.complex_correlation.
+    I_p = I_p - I_p.mean(dim=-1, keepdim=True)
+    Q_p = Q_p - Q_p.mean(dim=-1, keepdim=True)
+    I_t = I_t - I_t.mean(dim=-1, keepdim=True)
+    Q_t = Q_t - Q_t.mean(dim=-1, keepdim=True)
+    # Re(<g, p>) with <g, p> = Σ conj(g)·p
+    re = (I_t * I_p + Q_t * Q_p).sum(dim=-1)
+    n_t = (I_t.pow(2) + Q_t.pow(2)).sum(dim=-1)
+    n_p = (I_p.pow(2) + Q_p.pow(2)).sum(dim=-1)
+    # clamp before sqrt so an all-zero prediction gives ρ=0 (loss 1.0) with a
+    # finite gradient, instead of 0/0.
+    return 1.0 - re / (n_t.clamp_min(eps) * n_p.clamp_min(eps)).sqrt()
+
+
 def _spectral_per_patch(pred, target, transducer_window: int, depth_window: int):
     """MSE on the complex magnitude spectrum along the depth axis.
 
@@ -110,6 +145,7 @@ _REGISTRY = {
     "envelope": _envelope_mse_per_patch,
     "log_envelope": _log_envelope_mse_per_patch,
     "phase": _phase_per_patch,
+    "correlation": _correlation_per_patch,
 }
 _SPECTRAL = "spectral"
 
@@ -209,6 +245,9 @@ def calculate_loss(
                            "envelope"     — envelope MSE, phase-invariant
                            "log_envelope" — log-compressed envelope MSE
                            "phase"        — cosine phase-distance
+                           "correlation"  — 1 − Re(ρ), scale-invariant RF
+                                            waveform fidelity (maximises the
+                                            complex correlation coefficient)
                            "spectral"     — magnitude-spectrum MSE along depth
                          Compound example: "mse+envelope" →
                            (1-alpha)*mse + alpha*envelope.

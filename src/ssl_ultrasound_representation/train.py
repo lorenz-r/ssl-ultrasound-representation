@@ -98,6 +98,9 @@ def train(config: dict | None = None) -> dict:
     # Hyperparameters
     # ------------------------------------------------------------------
     lr = config.get("lr", 1.5e-4)
+    lr_schedule = config.get("lr_schedule", "cosine")  # "cosine" | "constant"
+    if lr_schedule not in ("cosine", "constant"):
+        raise ValueError(f"lr_schedule must be 'cosine' or 'constant', got {lr_schedule!r}")
     weight_decay = config.get("weight_decay", 0.05)
     epochs = config.get("epochs", 200)
     warmup_epochs = config.get("warmup_epochs", 20)
@@ -276,6 +279,7 @@ def train(config: dict | None = None) -> dict:
     monitor = TrainingMonitor(
         config={
             "lr": lr,
+            "lr_schedule": lr_schedule,
             "weight_decay": weight_decay,
             "epochs": epochs,
             "warmup_epochs": warmup_epochs,
@@ -327,6 +331,12 @@ def train(config: dict | None = None) -> dict:
     def lr_lambda(step: int) -> float:
         if step < warmup_steps:
             return (step + 1) / max(warmup_steps, 1)
+        if lr_schedule == "constant":
+            # Hold peak LR after warmup. Cosine decays to exactly 0 at the last
+            # step, which makes the tail of a debug run uninterpretable: a
+            # metric flattening there can be the model's floor or just the LR
+            # dying. Constant separates the two.
+            return 1.0
         progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
@@ -498,6 +508,14 @@ def _cli() -> dict:
     parser.add_argument("--warmup-epochs", type=int, dest="warmup_epochs")
     parser.add_argument("--batch-size", type=int, dest="batch_size")
     parser.add_argument("--lr", type=float)
+    parser.add_argument(
+        "--lr-schedule",
+        choices=("cosine", "constant"),
+        dest="lr_schedule",
+        help="Post-warmup LR schedule. 'cosine' (default) decays to 0 at the "
+        "final epoch; 'constant' holds the peak LR, so a metric plateau means "
+        "the model's floor rather than the schedule running out.",
+    )
     parser.add_argument("--mask-ratio", type=float, dest="mask_ratio")
     parser.add_argument(
         "--mask-mode",
