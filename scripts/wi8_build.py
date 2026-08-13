@@ -89,7 +89,12 @@ def stream_frames(splits=SPLITS, limit: int | None = None):
             seen += 1
 
 
-def shard_frames(splits=SPLITS, limit: int | None = None, keep_shards: bool = False):
+def shard_frames(
+    splits=SPLITS,
+    limit: int | None = None,
+    keep_shards: bool = False,
+    scratch: Path | None = None,
+):
     """Yield ``(frame_id, sample)`` by downloading one parquet shard at a time.
 
     ``frame_id`` is ``"{split}/{index}"`` — the convention PLAN.md WI-10's
@@ -102,10 +107,19 @@ def shard_frames(splits=SPLITS, limit: int | None = None, keep_shards: bool = Fa
     file is decoded through `datasets` all the same, just from local disk, so
     every column arrives with the same shapes and dtypes streaming produced.
 
-    Disk stays bounded: each shard is deleted once its frames are consumed
-    (``keep_shards=True`` disables that, for repeated local runs). Peak usage
-    is one shard (~5.4 GB for train) plus its arrow cache, not 271 GB.
+    **Disk discipline matters more than it looks.** Each shard is downloaded
+    with ``local_dir=`` into ``scratch`` so it lands as a *real file* that can
+    actually be deleted: the default cache instead returns a symlink into
+    ``blobs/``, and unlinking that frees nothing, so the full 271 GB would
+    accumulate — on this cluster the HF cache sits on a 32 GB overlay, which
+    it would exhaust within a handful of shards. The arrow cache `datasets`
+    builds while decoding is cleared for the same reason. Peak usage is one
+    shard plus its decode (~13 GB for train), not 271 GB.
     """
+    if scratch is None:
+        scratch = Path(HF_DATASETS_CACHE).parent / "wi8_shards"
+    scratch = Path(scratch)
+    scratch.mkdir(parents=True, exist_ok=True)
     seen = 0
     for split in splits:
         shards = sorted(
@@ -117,7 +131,9 @@ def shard_frames(splits=SPLITS, limit: int | None = None, keep_shards: bool = Fa
         for shard in shards:
             if limit is not None and seen >= limit:
                 return
-            local = hf_hub_download(HF_REPO, shard, repo_type="dataset")
+            local = hf_hub_download(
+                HF_REPO, shard, repo_type="dataset", local_dir=str(scratch)
+            )
             ds = load_dataset("parquet", data_files=local, split="train").with_format("numpy")
             try:
                 for row in ds:
@@ -129,8 +145,6 @@ def shard_frames(splits=SPLITS, limit: int | None = None, keep_shards: bool = Fa
             finally:
                 del ds
                 if not keep_shards:
-                    # Free the shard *and* the arrow cache datasets built from
-                    # it; otherwise the 271 GB arrives on disk after all.
                     Path(local).unlink(missing_ok=True)
                     shutil.rmtree(HF_DATASETS_CACHE, ignore_errors=True)
 
@@ -191,6 +205,14 @@ def main() -> None:
         action="store_true",
         help="don't delete each parquet shard after use (needs 271 GB free)",
     )
+    p.add_argument(
+        "--scratch",
+        type=Path,
+        default=None,
+        help="where shards are downloaded and deleted; must be on a filesystem "
+        "with ~15 GB free. Defaults next to the datasets cache — point it at "
+        "the same big disk as --out if that cache is on a small overlay.",
+    )
     args = p.parse_args()
 
     beamform_params = {
@@ -229,8 +251,16 @@ def main() -> None:
     if args.limit is not None:
         frame_ids = frame_ids[: args.limit]
     print(f"{len(frame_ids)} frames to build ({sizes}) -> {out_dir} [source={args.source}]")
+    # Default the shard scratch next to the store, which the caller has
+    # already had to put on a disk big enough for the build.
+    scratch = args.scratch if args.scratch is not None else out_dir.parent / "wi8_shards"
     iterator = (
-        shard_frames(tuple(args.splits), limit=args.limit, keep_shards=args.keep_shards)
+        shard_frames(
+            tuple(args.splits),
+            limit=args.limit,
+            keep_shards=args.keep_shards,
+            scratch=scratch,
+        )
         if args.source == "shard"
         else stream_frames(tuple(args.splits), limit=args.limit)
     )
@@ -281,6 +311,11 @@ def main() -> None:
     print(f"manifest: {manifest_dir / 'manifest.json'}")
     if built < len(frame_ids):
         print("INCOMPLETE — re-run the same command to resume from the manifest.")
+
+    # os._exit below skips the shard generator's own cleanup, so the last
+    # downloaded shard would otherwise be left behind.
+    if not args.keep_shards:
+        shutil.rmtree(scratch, ignore_errors=True)
 
     # Everything above is written and fsync'd. The HuggingFace streaming reader
     # keeps fsspec/aiohttp threads alive that can wedge interpreter shutdown on

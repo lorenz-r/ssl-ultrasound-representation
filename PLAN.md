@@ -1735,6 +1735,23 @@ confidently-reported noise.
 Angular binning adds **no** beamforming cost over element grouping (§3.2 — sectors
 are contiguous index ranges, so it is a scatter-add, not a K-fold loop).
 
+**⚠ Measured, rev-5 (TITAN RTX 24 GB, cluster `24g`).** Two corrections to the WI-8
+row above, both from the real build (`scripts/wi8_build.py`):
+
+- **Per-frame GPU is ~3.2 s, not 10–15 s** — measured repeatedly at 3.22–3.27 s
+  once the frame is on local disk, at the full 507×456 grid with K=16. So the
+  GPU half of the build is ~50 min, not 3–4 h.
+- **The wall-clock estimate depended entirely on *how* the data is read.**
+  `datasets` streaming sustains only **~2.7 MB/s** here (271 GB ⇒ ~28 h, i.e. far
+  *worse* than the 6–10 h assumed), while `hf_hub_download` of the same parquet
+  shards sustains **68–76 MB/s** (⇒ ~1 h). The build therefore fetches one shard,
+  beamforms its frames from local disk, and deletes it — bounding disk at one
+  shard rather than 271 GB, and putting the realistic total at **~2 h**. The two
+  read paths were verified to produce bit-identical output.
+
+Storage came out at **~26 MB/frame compressed (~24 GB)** against the 29.6 MB/frame
+uncompressed figure in §3.7.
+
 **⚠ The binding constraint is host I/O, not GPU, and the PW stack makes it worse.**
 A naive crop loader reads 2 MB per 128×128×16 crop; at 64 crops/frame × 923 frames
 that is ~118 GB per epoch, and the store is now 61.5 GB rather than 27.3 GB.
