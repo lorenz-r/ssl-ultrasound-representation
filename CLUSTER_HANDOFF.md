@@ -2,16 +2,19 @@
 
 Written for whoever (human or agent) picks this up on the CUDA cluster next.
 **Read [PLAN.md](PLAN.md) first** — it is the actual design doc, with the
-full reasoning, measured numbers, and revision history. This file is just a
-map of what got built on a CPU-only dev laptop and what's left, in PLAN.md's
-own WI numbering.
+full reasoning, measured numbers, and revision history. This file is a map of
+what is built and what is left, in PLAN.md's own WI numbering.
 
 ## Why this file exists
 
-This session implemented and tested every PLAN.md work item that does *not*
-strictly require a CUDA GPU or the 271 GB / 61 GB downloads. That machine had
-no `nvidia-smi`, so anything GPU-bound or requiring the full corpus was
-scoped out deliberately, not skipped by accident. **212 tests pass, `ruff
+Written across two phases. **Phase 1 (CPU-only dev laptop)** implemented and
+tested every work item that does *not* strictly require a CUDA GPU or the
+271 GB / 61 GB downloads — that machine had no `nvidia-smi`, so GPU-bound and
+full-corpus work was scoped out deliberately, not skipped by accident.
+**Phase 2 (cluster, TITAN RTX `24g`)** did the GPU and full-corpus work:
+WI-4's real-data gate (which had to be *rewritten* — see below) and WI-8's
+full 923-frame build, which now exists at
+`/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr`. **212 tests pass, `ruff
 check .` is clean, `pip install -e .` reproduces the environment** — no
 Poetry needed on the cluster; `pyproject.toml` declares its metadata in the
 standard PEP 621 `[project]` table, so plain `pip` builds it correctly
@@ -54,10 +57,10 @@ pip install "jax[cuda12]"   # not a zea dependency; must be added separately
 ## Which cluster instance for which step
 
 Three instance types are available here: `data` (CPU only — dataset/env
-management), `12g` (12 GB VRAM), `24g` (24 GB VRAM). None of this session's
-work ran on GPU, so the mapping below is a judgement call from what each step
-actually computes, not a measurement — treat it as a starting point, not
-gospel, and fall back to `24g` if something OOMs on a smaller instance.
+management), `12g` (12 GB VRAM), `24g` (24 GB VRAM). The beamforming rows are
+now **measured** (WI-4 and WI-8 both ran on a TITAN RTX `24g`); the training
+rows are still a judgement call from what each step computes — fall back to
+`24g` if something OOMs on a smaller instance.
 
 | Instance | Use it for | Why |
 |---|---|---|
@@ -88,6 +91,7 @@ inference-only feature extraction)? → `12g` first. Is it neither? → `data`.
 | WI-14 | Spatial MAE baseline (documented baseline only) | `src/ssl_us/models/mae2d.py` | `test_mae2d.py` (12) |
 | WI-15 | Cross-aperture prediction arm (optional in the plan) | `src/ssl_us/models/xaperture.py` | `test_xaperture.py` (15) |
 | WI-16 | Stanford `.mat` reader + HVMux remap | `src/ssl_us/beamform/stanford_mat.py` | `test_stanford_mat.py` (12, run against the real files in `data/rats/`) |
+| WI-8 | Full K-sector store: per-frame beamforming, zarr store + reader, resumable build — **923/923 frames built** | `src/ssl_us/beamform/{frame,store}.py`, `scripts/wi8_{build,verify,profile}.py` | `test_store.py` (11), `test_wi8_build.py` (6) |
 | WI-0 | (pre-existing) NVIDIA frame verification | `scripts/wi0_probe.py` | `test_nv_frame.py` (8) |
 
 None of the above needed a CUDA GPU or the full corpus — every test either
@@ -107,9 +111,10 @@ the real local Stanford `.mat` files already sitting in `data/rats/`.
 
 ## Not done — what's actually left, and why
 
-(WI-4 is now **done**; its entry is kept at the top of this section because
-the *reason* it is done — the original gate being unachievable — is the thing
-a future reader most needs to know before touching the beamformer.)
+(WI-4 and WI-8 are both now **done**; their entries are kept at the top of
+this section because the *reasons* — the original WI-4 gate being
+unachievable, and the three traps in the WI-8 build — are what a future reader
+most needs to know before touching the beamformer or rebuilding the store.)
 
 ### WI-4 — DONE. Gate passes on 8/8 frames — but the *gate itself* was rewritten
 
@@ -174,7 +179,42 @@ physical, and not worth 61.5 GB vs 27.3 GB. `augment.py`'s
 building the PW stack without re-reading §10.3(b) and deciding the override
 was wrong — that's a judgement call, not a bug.
 
-### WI-8 — build machinery DONE and verified; the full 923-frame run is what's left
+### WI-8 — **DONE. 923/923 frames built and verified.**
+
+The full store exists and meets every clause of PLAN.md WI-8's done-condition:
+
+| Done-when clause | Result |
+|---|---|
+| 923/923 frames present | **923/923**, manifest complete |
+| Manifest complete | `wi8_fsa_k16.zarr.build/manifest.json`, both shards closed |
+| WI-4's gate re-run on 10 frames *from the finished store* | **10/10 pass** (`tests/data/wi8_store_verification.json`) |
+| Depth-RMS profile plotted for the whole corpus | `figures/wi8/depth_rms_profile.png`, **7.6 dB** decay 5-10 → 30-38 mm |
+| (extra) every frame finite and non-empty | **923/923** |
+
+**Where it is:** `/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr` (23 GB, on the
+persistent NFS home; verified frame-identical to the build output, which was
+written to ephemeral `/tmp`). A 25 GB probe write to home succeeded, so the
+quota has room. Per-frame labels — `t0`, `phase_error`, `sos_mean`, `sos_std`,
+`cyst_fraction`, `segmentation_empty` — are in `frame_metadata.json` beside it.
+
+**Build took ~2 h wall**, matching the revised estimate: ~3.25 s/frame GPU in
+steady state, the rest shard download. Two independent cross-checks that the
+store is really right, beyond the gate:
+
+- The metadata reports **exactly 75 frames with an empty `segmentation_map`**,
+  matching PLAN.md §2's independently measured "75 of 923 (8.1 %)" — so frame
+  ordering and label extraction both line up with NVIDIA's own indexing.
+- The per-frame RMS histogram is visibly **trimodal**, consistent with §2.3's
+  finding that `t0` takes exactly three values across the corpus (435/116/372).
+
+The depth-RMS profile is **measured and stored, never divided out** — PLAN.md
+§1.3's warning about the old repo's `normalize_frame` deleting the attenuation
+signal that §4.5c exists to probe.
+
+WI-9 (HF publication), WI-10 (splits), WI-13 (results matrix) and WI-12
+(VICReg training) are all unblocked by this.
+
+#### How it was built (kept for whoever rebuilds or extends it)
 
 The missing pieces are written and tested end-to-end against real data:
 
@@ -189,13 +229,9 @@ Tests: `test_store.py` (11), `test_wi8_build.py` (6). `build_store` gained an
 optional `write_frame` argument so the real zarr build runs through WI-6's
 *same* tested resumability code path rather than a parallel copy of it.
 
-**Verified on a 4-frame smoke build** (`--limit 4`, validation split):
-frames land at the right shape, resume re-runs nothing (4.9 s, no download,
-no beamforming), and **4/4 frames pass WI-4's gate when read back through the
-documented K-ladder path** — `tests/data/wi8_store_verification.json`, e.g.
-frame 1 gCNR 0.8614 vs reference 0.8459. That is WI-8's stated done-condition,
-demonstrated at small scale. The shard-based and streaming source paths were
-also checked against each other and produce **bit-identical** frames.
+Resume was verified against the real store (4.9 s, no download, no
+beamforming), and the shard-based and streaming source paths were checked
+against each other and produce **bit-identical** frames.
 
 **Two measured surprises, both of which change the plan's numbers:**
 
@@ -371,8 +407,8 @@ image.
 - [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 212 passed, 6 skipped
       (the 6 skips are `test_stanford_mat.py`, which needs `data/rats/*.mat`)
 - [ ] `ruff check .` → clean
-- [ ] On a `12g`/`24g` instance: `nvidia-smi` works (obviously didn't on the
-      dev laptop; confirm here)
+- [x] On a `12g`/`24g` instance: `nvidia-smi` works — confirmed, TITAN RTX
+      24 GB, driver 580.105.08 / CUDA 13.0, `torch.cuda.is_available()` True
 - [ ] Decide: one `KERAS_BACKEND=jax` venv for beamforming, torch venv for
       training (PLAN.md §0.6), or continue with the single-venv
       `KERAS_BACKEND=torch` setup this session used. Either works; the

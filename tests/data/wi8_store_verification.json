@@ -1,6 +1,6 @@
 {
- "n_pass": 4,
- "n": 4,
+ "n_pass": 10,
+ "n": 10,
  "frames": [
   {
    "frame_id": "validation/0",
@@ -48,6 +48,81 @@
    "reference_speckle_snr": 1.8878432809777055,
    "gcnr": 0.47850508122689495,
    "reference_gcnr": 0.46712769102110663,
+   "checks": {
+    "speckle_snr_rayleigh": true,
+    "gcnr_tracks_reference": true
+   },
+   "pass": true
+  },
+  {
+   "frame_id": "validation/4",
+   "has_inclusion": true,
+   "speckle_snr": 1.7277826525303648,
+   "reference_speckle_snr": 1.729465123341505,
+   "gcnr": 0.847855627872921,
+   "reference_gcnr": 0.849299153203945,
+   "checks": {
+    "speckle_snr_rayleigh": true,
+    "gcnr_tracks_reference": true
+   },
+   "pass": true
+  },
+  {
+   "frame_id": "validation/5",
+   "has_inclusion": false,
+   "speckle_snr": 1.6897565100745093,
+   "reference_speckle_snr": 1.707601226032663,
+   "checks": {
+    "speckle_snr_rayleigh": true
+   },
+   "pass": true
+  },
+  {
+   "frame_id": "validation/6",
+   "has_inclusion": true,
+   "speckle_snr": 1.8566211268898303,
+   "reference_speckle_snr": 1.8795020763592805,
+   "gcnr": 0.6297274329860196,
+   "reference_gcnr": 0.585811182821425,
+   "checks": {
+    "speckle_snr_rayleigh": true,
+    "gcnr_tracks_reference": true
+   },
+   "pass": true
+  },
+  {
+   "frame_id": "validation/7",
+   "has_inclusion": true,
+   "speckle_snr": 1.704160334859874,
+   "reference_speckle_snr": 1.6966329131321336,
+   "gcnr": 0.7791627001891903,
+   "reference_gcnr": 0.8057676870590778,
+   "checks": {
+    "speckle_snr_rayleigh": true,
+    "gcnr_tracks_reference": true
+   },
+   "pass": true
+  },
+  {
+   "frame_id": "validation/8",
+   "has_inclusion": true,
+   "speckle_snr": 1.9024719120021445,
+   "reference_speckle_snr": 1.9028242564490143,
+   "gcnr": 0.2684040410067692,
+   "reference_gcnr": 0.25674318567821586,
+   "checks": {
+    "speckle_snr_rayleigh": true,
+    "gcnr_tracks_reference": true
+   },
+   "pass": true
+  },
+  {
+   "frame_id": "validation/9",
+   "has_inclusion": true,
+   "speckle_snr": 1.7140223931448864,
+   "reference_speckle_snr": 1.703563874363881,
+   "gcnr": 0.8621106402834745,
+   "reference_gcnr": 0.8607000646724137,
    "checks": {
     "speckle_snr_rayleigh": true,
     "gcnr_tracks_reference": true
