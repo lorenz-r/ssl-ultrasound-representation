@@ -14,7 +14,7 @@ full-corpus work was scoped out deliberately, not skipped by accident.
 **Phase 2 (cluster, TITAN RTX `24g`)** did the GPU and full-corpus work:
 WI-4's real-data gate (which had to be *rewritten* — see below) and WI-8's
 full 923-frame build, which now exists at
-`/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr`. **249 tests pass, `ruff
+`/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr`. **257 tests pass, `ruff
 check .` is clean, `pip install -e .` reproduces the environment** — no
 Poetry needed on the cluster; `pyproject.toml` declares its metadata in the
 standard PEP 621 `[project]` table, so plain `pip` builds it correctly
@@ -75,6 +75,53 @@ inference-only feature extraction)? → `12g` first. Is it neither? → `data`.
 
 ---
 
+## Running an unattended multi-hour job on `24g`
+
+Learned the hard way on 2026-08-14, when the WI-12 run lost ~2 h to a reap.
+Each of these is cheap to get right up front and expensive to rediscover.
+
+**Launch detached, always:**
+
+```bash
+setsid nohup bash scripts/wi12_run_both.sh \
+  >> /mnt/home/benbarkow/logs/wi12_night.log 2>&1 < /dev/null &
+```
+
+A job started as a plain background child of an interactive (or agent) shell
+dies *with that shell* — silently, mid-epoch, no traceback, `oom_kill 0`. That
+is what killed WI-12 arm A at epoch 48. The GPU then sat idle and the
+orchestrator reaped the whole instance 1h45m later, which wiped `/tmp`.
+
+- **Don't run `pytest -q`, or anything CPU-heavy, while a job is training.**
+  This box has **4 cores** and the loader runs 4 workers; the suite starves
+  them and GPU util drops to 0%, which is indistinguishable from a hung run.
+  Run the suite on a `data` instance instead.
+- **`/tmp` does not survive a container restart**, so the local copy of the
+  23 GB store must be re-staged after every reap (`wi12_run_both.sh` does it
+  automatically). Budget ~7 min: NFS read measured **58 MiB/s under
+  contention**, not the 241 MB/s quoted elsewhere. Plan with the slow number.
+- **Nothing inside the container can restart a reaped job** — a watchdog dies
+  with the container it watches. Checkpoints are on the NFS home, so recovery
+  is manual but cheap: re-run the launch command, and each arm resumes from
+  `last.pt`.
+- **To hold VRAM near the cap without paying throughput, run
+  `scripts/wi12_ballast.py`** alongside training. It allocates idle tensors in
+  a separate CUDA context and sleeps, so it uses no SMs — measured 1539–1672
+  pairs/s with it against 1520–1726 without, i.e. free. Useful if the
+  orchestrator's idle metric is memory rather than utilization.
+  - It is capped at `TOTAL - 10 GB` deliberately. A ballast that merely fills
+    *free* memory expands into arm A's footprint the moment A exits, and then
+    OOMs arm B, which allocates its whole pool at once. The fixed reservation
+    holds that space open regardless of what is alive.
+  - Do **not** use `--cache-frames` for this — 32 and 48 both benchmarked
+    *slower* than 24 (see `scripts/wi12_run_both.sh`).
+
+⚠ **`CLAUDE.md` is gitignored in this repo** (`.gitignore:6`), so it is
+local-only scratch. Anything a future session must not lose belongs here or in
+PLAN.md, not there.
+
+---
+
 ## Done, with tests (safe to build on top of)
 
 | WI | What | Where | Tests |
@@ -87,7 +134,7 @@ inference-only feature extraction)? → `12g` first. Is it neither? → `data`.
 | WI-6 | Resumable build pipeline (+ pluggable `write_frame`, used by WI-8's zarr store) | `src/ssl_us/beamform/build.py` | `test_build.py` (7) |
 | WI-7 | Dataset-level RMS normalization | `src/ssl_us/data/normalization.py` | `test_normalization.py` (7) |
 | WI-11 | Augmentation Policies A & B | `src/ssl_us/data/augment.py` | `test_augment.py` (17) |
-| WI-12 | VICReg model, training loop, §4.7 instrumentation | `src/ssl_us/models/{resnet,vicreg}.py`, `src/ssl_us/train/{vicreg,instrument}.py`, `src/ssl_us/train/README.md` | `test_models.py` (12), `test_instrument.py` (10), `test_train_vicreg.py` (3), `test_wi12_eval_integration.py` (1) |
+| WI-12 | VICReg model, training loop, §4.7 instrumentation | `src/ssl_us/models/{resnet,vicreg}.py`, `src/ssl_us/train/{vicreg,instrument}.py`, `src/ssl_us/train/README.md` | `test_models.py` (12), `test_instrument.py` (10), `test_train_vicreg.py` (7), `test_wi12_eval_integration.py` (1) |
 | WI-14 | Spatial MAE baseline (documented baseline only) | `src/ssl_us/models/mae2d.py` | `test_mae2d.py` (12) |
 | WI-15 | Cross-aperture prediction arm (optional in the plan) | `src/ssl_us/models/xaperture.py` | `test_xaperture.py` (15) |
 | WI-16 | Stanford `.mat` reader + HVMux remap | `src/ssl_us/beamform/stanford_mat.py` | `test_stanford_mat.py` (12, run against the real files in `data/rats/`) |
@@ -100,7 +147,7 @@ Every *test* above runs without a GPU or the full corpus — they use synthetic
 data, a small real download (a couple of NVIDIA frames), or the real local
 Stanford `.mat` files in `data/rats/`. ⚠ **`data/rats/` is not present on the
 cluster** (it was local to the phase-1 laptop), so `pytest -q` here reports
-**249 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
+**257 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
 cleanly. Re-download the Stanford `.mat` files before WI-16 work. The two exceptions are the artefacts
 rather than the tests: WI-4's gate numbers and WI-8's 923-frame store were
 both produced on a `24g` GPU instance against the full corpus.
@@ -347,7 +394,51 @@ KERAS_BACKEND=jax python scripts/wi8_build.py \
 
 With that, `/` stayed flat at 537 MB for the whole 923-frame run.
 
-### WI-12 — training loader is DONE; the runs themselves are not
+### WI-12 — **DONE. Both arms trained to completion 2026-08-14.**
+
+Ran on `24g` via `scripts/wi12_run_both.sh`. Checkpoints in
+`/mnt/home/benbarkow/checkpoints/wi12_vicreg_policy{A,B}/` (`last.pt` +
+every-25-epoch snapshots), per-epoch metrics in `history.json` beside them,
+logs in `/mnt/home/benbarkow/logs/`. Both arms ran the full 223 epochs —
+derived from PLAN.md §5.4's 11.8M-pair budget against the verified 830-frame
+train split at 207 steps/epoch, **not** the plan's stale 115.
+
+| | Policy A | Policy B |
+|---|---|---|
+| status | completed, 1.53 h | completed, 1.46 h |
+| pairs | 11,817,216 | 11,817,216 |
+| loss | 21.32 → **8.33** | 21.17 → **7.82** |
+| RankMe | 286.1 → **287.1** | 298.0 → **304.5** |
+| invariance | 0.096 → 0.019 | 0.081 → 0.006 |
+| variance | 0.692 → 0.100 | 0.690 → 0.084 |
+| covariance | 1.628 → 5.346 | 1.896 → 5.575 |
+| mean throughput | 1646 pairs/s | 2110 pairs/s |
+
+**Neither arm collapsed**, and the evidence is stronger than "the detector
+didn't fire": RankMe *ended above where it started* in both, so the embedding
+occupied more dimensions at convergence than at init. Both traced the same
+shape — a dip over the first ~40 epochs (A bottomed near 263, B near 193) then
+a full recovery — so an early RankMe decline in a rerun is not by itself cause
+to intervene. Final RankMe is flat to ±1 over the last 8 epochs of each.
+
+At 1.5 h/arm this came in well under §5.4's 4–6 h/run budget. The throughput
+table further down is the older crop-shipping measurement, kept only for the
+progression it shows.
+
+> ⚠ **The epoch-50 landmine, fixed 2026-08-14 — don't reintroduce it.**
+> `_is_collapsing` compared a window against its own tail with
+> `zip(..., strict=True)`. That pairing is ragged by construction (`n` values →
+> `n-1` comparisons), so the function could never return a verdict — it raised
+> `ValueError` on *every* call that got past its length guard. Gated behind
+> `collapse_grace_epochs = 50`, it therefore killed each arm at exactly epoch
+> 50. It had no test coverage; `tests/test_train_vicreg.py` now has four.
+> Ruff's `B905` requires an explicit `strict=`, which is the likely origin of
+> the wrong value — the correct one here is `strict=False`.
+>
+> A second bug hid the first: the collapse halt exited **1**, and Python also
+> exits 1 on any uncaught exception, so `wi12_run_both.sh`'s "rc=1 → don't
+> retry" rule logged a hard crash as `HALTED (collapse)` and skipped the arm
+> instead of resuming it. The halt now exits **3**; keep those codes distinct.
 
 `src/ssl_us/data/dataset.py` reads the WI-8 store and feeds VICReg. Two things
 about it are load-bearing and were driven by measurement, not taste:
@@ -513,7 +604,7 @@ image.
 
 ## Quick sanity checklist before starting new work
 
-- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 249 passed, 6 skipped
+- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 257 passed, 6 skipped
       (the 6 skips are `test_stanford_mat.py`, which needs `data/rats/*.mat`)
 - [ ] `ruff check .` → clean
 - [x] On a `12g`/`24g` instance: `nvidia-smi` works — confirmed, TITAN RTX
