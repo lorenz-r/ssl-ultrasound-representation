@@ -30,6 +30,14 @@ def singular_value_spectrum(features: torch.Tensor | np.ndarray) -> np.ndarray:
     """
     if isinstance(features, torch.Tensor):
         features = features.detach().cpu().numpy()
+    # Under AMP the backbone emits float16, which `np.linalg.svd` rejects
+    # outright ("array type float16 is unsupported in linalg"). Promote here,
+    # at the single point every caller funnels through, rather than asking
+    # each training loop to remember to cast. float32 is enough for a
+    # diagnostic spectrum and halves the copy against float64.
+    features = np.asarray(features)
+    if features.dtype != np.float64:
+        features = features.astype(np.float32, copy=False)
     centered = features - features.mean(axis=0, keepdims=True)
     return np.linalg.svd(centered, compute_uv=False)
 

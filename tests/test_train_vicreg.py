@@ -10,7 +10,7 @@ import torch
 from ssl_us.models.resnet import BACKBONE_DIM, ResNetBackbone
 from ssl_us.models.vicreg import VICReg
 from ssl_us.train import instrument as instr
-from ssl_us.train.vicreg import VICRegTrainConfig, train_vicreg
+from ssl_us.train.vicreg import VICRegTrainConfig, _is_collapsing, train_vicreg
 
 
 def _synthetic_loader(n_batches: int, batch_size: int, in_channels: int, size: int):
@@ -56,3 +56,45 @@ def test_train_vicreg_with_online_probe_never_leaks_gradient():
     history = train_vicreg(model, loader, config, probe=probe, probe_label_fn=label_fn)
     assert "probe_loss" in history
     assert len(history["probe_loss"]) == 1
+
+
+# --- dimensional-collapse detector (PLAN.md §4.7) ---------------------------
+# Regression coverage for a bug that halted both WI-12 arms at epoch 50: the
+# detector paired a window with its own tail under `zip(..., strict=True)`,
+# which is ragged by construction, so every call that got past the length
+# guard raised ValueError instead of returning a verdict. The chain then read
+# python's exit-1 as the deliberate collapse halt and skipped the arm.
+
+
+def test_is_collapsing_returns_a_verdict_rather_than_raising():
+    """The detector must be callable at all once the window is long enough."""
+    history = {
+        "rankme": [100.0 - i for i in range(20)],
+        "loss": [10.0 - 0.1 * i for i in range(20)],
+    }
+    assert _is_collapsing(history, patience=10) is True
+
+
+def test_is_collapsing_true_only_when_rank_and_loss_both_fall():
+    falling_rank = [100.0 - i for i in range(12)]
+    falling_loss = [10.0 - 0.1 * i for i in range(12)]
+    rising_loss = [10.0 + 0.1 * i for i in range(12)]
+
+    assert _is_collapsing({"rankme": falling_rank, "loss": falling_loss}, 10) is True
+    # RankMe down while the loss *rises* is an unstable run, not a collapse.
+    assert _is_collapsing({"rankme": falling_rank, "loss": rising_loss}, 10) is False
+    assert _is_collapsing({"rankme": [100.0] * 12, "loss": falling_loss}, 10) is False
+
+
+def test_is_collapsing_is_false_before_the_window_fills():
+    history = {"rankme": [100.0 - i for i in range(8)], "loss": [10.0 - i for i in range(8)]}
+    assert _is_collapsing(history, patience=10) is False
+    assert _is_collapsing(history, patience=0) is False
+
+
+def test_is_collapsing_tolerates_a_single_non_monotonic_epoch():
+    """One epoch of recovery inside the window breaks the collapse signature."""
+    rank = [100.0 - i for i in range(12)]
+    rank[5] = rank[4] + 1.0
+    loss = [10.0 - 0.1 * i for i in range(12)]
+    assert _is_collapsing({"rankme": rank, "loss": loss}, 10) is False
