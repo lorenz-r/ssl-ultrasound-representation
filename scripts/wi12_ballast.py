@@ -21,6 +21,7 @@ ballast if free memory ever dips below FLOOR_MB.
 
 from __future__ import annotations
 
+import argparse
 import time
 
 import torch
@@ -30,7 +31,6 @@ RESERVE_MB = 10240        # never hand out; arm A/B measured at ~6.35 GB residen
 FLOOR_MB = 2048           # emergency release threshold
 CHUNK_MB = 512
 POLL_S = 20
-NIGHT_LOG = "/mnt/home/benbarkow/logs/wi12_night.log"
 LOG = "/mnt/home/benbarkow/logs/wi12_ballast.log"
 
 
@@ -47,23 +47,40 @@ def free_mb() -> int:
     return free_bytes // (1024 * 1024)
 
 
-def chain_done() -> bool:
+def chain_done(log_path: str, marker: str) -> bool:
+    """True once the watched chain has written its completion marker.
+
+    Both the log and the marker are arguments rather than constants: the
+    ballast outlived the WI-12 chain it was written for, and a hardcoded
+    sentinel made it exit *immediately* when re-used for WI-13, because the
+    WI-12 marker was already sitting in that file from the previous run.
+    """
     try:
-        with open(NIGHT_LOG) as fh:
-            return "=== WI-12 done" in fh.read()
+        with open(log_path) as fh:
+            return marker in fh.read()
     except OSError:
         return False
 
 
 def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--done-log", default="/mnt/home/benbarkow/logs/wi12_night.log",
+                   help="log to watch for the chain's completion marker")
+    p.add_argument("--done-marker", default="=== WI-12 done",
+                   help="substring that means the watched chain has finished")
+    p.add_argument("--reserve-mb", type=int, default=RESERVE_MB,
+                   help="VRAM never handed out, so the next run can allocate its pool")
+    args = p.parse_args()
+
     torch.cuda.init()
     ballast: list[torch.Tensor] = []
-    cap_mb = TOTAL_MB - RESERVE_MB
-    say(f"start: cap={cap_mb} MB (total {TOTAL_MB}, reserve {RESERVE_MB}), floor={FLOOR_MB} MB")
+    cap_mb = TOTAL_MB - args.reserve_mb
+    say(f"start: cap={cap_mb} MB (total {TOTAL_MB}, reserve {args.reserve_mb}), "
+        f"floor={FLOOR_MB} MB, watching {args.done_log!r} for {args.done_marker!r}")
 
     while True:
-        if chain_done():
-            say("WI-12 chain finished — releasing ballast and exiting")
+        if chain_done(args.done_log, args.done_marker):
+            say(f"{args.done_marker!r} seen — releasing ballast and exiting")
             return 0
 
         held_mb = len(ballast) * CHUNK_MB
