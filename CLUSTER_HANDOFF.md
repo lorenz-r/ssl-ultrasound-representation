@@ -14,7 +14,7 @@ full-corpus work was scoped out deliberately, not skipped by accident.
 **Phase 2 (cluster, TITAN RTX `24g`)** did the GPU and full-corpus work:
 WI-4's real-data gate (which had to be *rewritten* — see below) and WI-8's
 full 923-frame build, which now exists at
-`/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr`. **257 tests pass, `ruff
+`/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr`. **262 tests pass, `ruff
 check .` is clean, `pip install -e .` reproduces the environment** — no
 Poetry needed on the cluster; `pyproject.toml` declares its metadata in the
 standard PEP 621 `[project]` table, so plain `pip` builds it correctly
@@ -141,13 +141,14 @@ PLAN.md, not there.
 | WI-8 | Full K-sector store: per-frame beamforming, zarr store + reader, resumable build — **923/923 frames built** | `src/ssl_us/beamform/{frame,store}.py`, `scripts/wi8_{build,verify,profile}.py` | `test_store.py` (11), `test_wi8_build.py` (6) |
 | WI-11/12 | Augmentation policies (**batched torch, GPU**) + store-backed crop loader with frame-cached shuffle buffer | `src/ssl_us/data/{augment,dataset}.py` | `test_augment.py` (24), `test_dataset.py` (12), `test_transforms.py` (18) |
 | WI-10 | Splits + leakage guard, **verified on the real 923-frame store**; per-run split-audit figure | `src/ssl_us/data/splits.py`, `src/ssl_us/eval/viz.py` (`plot_split_audit`), `scripts/wi10_splits.py` | `test_wi10_splits.py` (12), `test_guards.py` |
+| WI-13 | Results matrix, **K=4 column** — store-backed crops, frozen WI-12 encoders, A-vs-B contrast | `src/ssl_us/eval/store_features.py`, `scripts/wi13_matrix.py`, results in `tests/data/wi13_k4_results.json` | `test_store_features.py` (5) |
 | WI-0 | (pre-existing) NVIDIA frame verification | `scripts/wi0_probe.py` | `test_nv_frame.py` (8) |
 
 Every *test* above runs without a GPU or the full corpus — they use synthetic
 data, a small real download (a couple of NVIDIA frames), or the real local
 Stanford `.mat` files in `data/rats/`. ⚠ **`data/rats/` is not present on the
 cluster** (it was local to the phase-1 laptop), so `pytest -q` here reports
-**257 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
+**262 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
 cleanly. Re-download the Stanford `.mat` files before WI-16 work. The two exceptions are the artefacts
 rather than the tests: WI-4's gate numbers and WI-8's 923-frame store were
 both produced on a `24g` GPU instance against the full corpus.
@@ -509,7 +510,62 @@ Needs WI-8's output. Not started — no code written for the dataset card or
 the smoke-subset extraction. PLAN.md §5.2 WI-9 lists exactly what the card
 must contain (attribution, license, changes-made statement, etc.).
 
-### WI-13 — full results matrix
+### WI-13 — K=4 column DONE; the other K columns need their own training runs
+
+Run it with:
+
+```bash
+python scripts/wi13_matrix.py --split validation --crops-per-frame 32 \
+  --out figures/wi13_k4_validation
+```
+
+Numbers below are on the **93 `validation` frames** (2976 crops) — the frames
+the SSL encoders never saw. VICReg pre-training is label-free so probing the
+train split would not leak labels, and SSL convention would allow it, but those
+images shaped the weights; `--split train` runs that in-sample version.
+Full output is committed at `tests/data/wi13_k4_results.json` (`figures/` is
+gitignored, so the JSON is the durable artifact).
+
+| target | A | B | random | trivial | arms clear controls? |
+|---|---|---|---|---|---|
+| phase_error | +0.265 | +0.401 | **+0.476** | **+0.503** | ✗ **no** |
+| t0_group † | +0.349 | **+0.541** | +0.438 | +0.392 | B only |
+| sos_mean_frame | **+0.890** | +0.881 | +0.786 | +0.679 | ✓ |
+| sos_std_frame | +0.308 | **+0.515** | +0.397 | +0.305 | B only |
+| cyst_fraction | **+0.464** | +0.318 | −0.002 | +0.288 | ✓ |
+| z_centre | +0.724 | **+0.755** | +0.603 | +0.515 | ✓ |
+| x_centre | **+0.524** | −0.001 | +0.117 | −0.001 | A only |
+
+R² except † (balanced accuracy). `pca_raw` is ≈0 on every target and is omitted.
+
+Four things worth carrying forward:
+
+1. **Only `t0_group` and `x_centre` separate the arms at 95 % CI.** Every other
+   row's intervals overlap, so those deltas are within noise at n_eff = 93.
+   Do not report the A-vs-B ordering on the overlapping rows as a finding.
+2. **Both arms fail the `phase_error` control.** `trivial` — literally the mean
+   and std of the crop envelope, two numbers — scores highest. That is PLAN.md
+   §4.1's frame-level-cue control doing exactly what it was put there to do;
+   the encoders have not learned phase error beyond global brightness.
+3. **Policy B carries no horizontal position** (x_centre R² ≈ 0) while A carries
+   a lot. That is the geometry-only augmentation behaving as specified, and it
+   is the cleanest demonstration in the matrix that the policy contrast bites.
+4. **Geometry explains only 7.9 %** of Policy A's feature variance, so the
+   representation is not merely encoding where the crop came from.
+
+**Not run, with reasons** (also machine-readable under `not_run` in the JSON):
+the `K ∈ {16, 8, 1}` columns each need their own VICReg run, because K sets the
+stem's input channel count (`Conv2d(2K, 64, …)`) — a K=16 cell is a different
+model, not a different evaluation of this one, at ~1.5 h/arm. The crop-level
+anatomy targets (`contains_cyst`, crop-level `cyst_fraction`, crop-level
+`sos_mean`) need the per-pixel `seg`/`sos` maps, which live in the source
+NVIDIA frames; `data/` is empty on this cluster and only the beamformed store
+survived, so they cannot be run without re-downloading.
+
+PLAN.md §5.5's cut-list item 4 already sanctions a reduced ladder (drop
+K ∈ {8,4}, keep K=16 and K=1), so the next increment is 4 runs, not 6.
+
+### WI-13 (original notes) — full results matrix
 
 **The store reader now exists** — `ssl_us.beamform.store.open_store` (WI-8), the
 piece this section previously flagged as missing.
@@ -604,7 +660,7 @@ image.
 
 ## Quick sanity checklist before starting new work
 
-- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 257 passed, 6 skipped
+- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 262 passed, 6 skipped
       (the 6 skips are `test_stanford_mat.py`, which needs `data/rats/*.mat`)
 - [ ] `ruff check .` → clean
 - [x] On a `12g`/`24g` instance: `nvidia-smi` works — confirmed, TITAN RTX
