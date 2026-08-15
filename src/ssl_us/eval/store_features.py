@@ -14,12 +14,14 @@ which differs in three ways that this module exists to absorb:
    occupancy — never the reverse, PLAN.md §3.2), then `(…, K)` moved to the
    channel axis as I-block-then-Q-block. That mirrors `GpuAugmentor.__call__`
    with the augmentation removed.
-3. **Only frame-level labels survive.** `frame_metadata.json` beside the store
-   carries scalars per frame (`t0`, `phase_error`, `sos_mean`, `sos_std`,
+3. **Only frame-level labels survive the store.** `frame_metadata.json` beside
+   it carries scalars per frame (`t0`, `phase_error`, `sos_mean`, `sos_std`,
    `cyst_fraction`); the per-pixel `seg` and `sos` maps live in the source
-   NVIDIA frames, which are not on the cluster. Crop-level anatomy targets are
-   therefore unavailable from the store alone — see `scripts/wi13_matrix.py`,
-   which reports them as explicitly-blocked cells rather than dropping them.
+   NVIDIA rows. Those are now fetched separately — `data/label_maps.py`, built
+   by `scripts/wi13_fetch_label_maps.py` — and `LabelMaps.crop_labels` turns
+   `StoreCropBatch.origins` into the crop-level anatomy targets. Until that is
+   wired into `scripts/wi13_matrix.py` those cells are still reported as
+   explicitly-blocked rather than dropped.
 
 Both arms are encoded through the identical un-augmented path, so the Policy A
 vs Policy B contrast is a difference in learned weights and nothing else.

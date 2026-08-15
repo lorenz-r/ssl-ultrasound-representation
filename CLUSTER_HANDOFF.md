@@ -144,13 +144,14 @@ PLAN.md, not there.
 | WI-11/12 | Augmentation policies (**batched torch, GPU**) + store-backed crop loader with frame-cached shuffle buffer | `src/ssl_us/data/{augment,dataset}.py` | `test_augment.py` (24), `test_dataset.py` (12), `test_transforms.py` (18) |
 | WI-10 | Splits + leakage guard, **verified on the real 923-frame store**; per-run split-audit figure | `src/ssl_us/data/splits.py`, `src/ssl_us/eval/viz.py` (`plot_split_audit`), `scripts/wi10_splits.py` | `test_wi10_splits.py` (12), `test_guards.py` |
 | WI-13 | Results matrix, **K ∈ {1,4,16} × {A,B}** — store-backed crops, frozen WI-12 encoders, A-vs-B contrast | `src/ssl_us/eval/store_features.py`, `scripts/wi13_matrix.py`, results in `tests/data/wi13_k{1,4,16}_{train,validation}_results.json` | `test_store_features.py` (5) |
+| WI-13 | Per-pixel `seg`/`sos`/`bmode` maps for all 923 frames, fetched by column (1.9 GB, not 271 GB) and verified frame-for-frame against the store — unblocks the crop-level anatomy targets | `scripts/wi13_fetch_label_maps.py`, `src/ssl_us/data/label_maps.py`, data at `/mnt/home/benbarkow/stores/wi8_label_maps/` | `test_label_maps.py` (12) |
 | WI-0 | (pre-existing) NVIDIA frame verification | `scripts/wi0_probe.py` | `test_nv_frame.py` (8) |
 
 Every *test* above runs without a GPU or the full corpus — they use synthetic
 data, a small real download (a couple of NVIDIA frames), or the real local
 Stanford `.mat` files in `data/rats/`. ⚠ **`data/rats/` is not present on the
 cluster** (it was local to the phase-1 laptop), so `pytest -q` here reports
-**271 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
+**283 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
 cleanly. Re-download the Stanford `.mat` files before WI-16 work. The two exceptions are the artefacts
 rather than the tests: WI-4's gate numbers and WI-8's 923-frame store were
 both produced on a `24g` GPU instance against the full corpus.
@@ -655,6 +656,18 @@ API exploration (signature, inversion-method choice — adjoint/Tikhonov/
 rSVD/tSVD) that this session didn't have time for. `combine_rx_halves`
 hands back exactly the per-transmit 192-element complex IQ signal that
 should feed into it.
+
+**Also blocked on the data, and there is no remote copy of the raw files.**
+Searched 2026-08-15: no URL for the Stanford `.mat` set anywhere in this repo
+or its history. The nearest thing is the *retired* HF dataset
+`benbarkow/us-ssl-mf` — the same 168 frames as `rf_iq`
+`(168, 192, 192, 3, 2, 215)` float32 zarr, 30.7 GB, one chunk per frame, HVMux
+already combined, so it would feed `Refocus` directly. But it is cut at
+`depth_cutoff_samples = 860` and **decimated 4× in fast time**
+(`downsample_factor: 4` → 215 samples), which is a lossy derivative of what
+WI-16 assumes. Deliberately not downloaded. Copy `data/rats/*.mat` off the Mac
+instead; fall back to the HF copy only with that decimation stated in the
+write-up.
 
 ### Manual action (not code)
 

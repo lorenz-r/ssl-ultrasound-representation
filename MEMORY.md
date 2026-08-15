@@ -51,6 +51,7 @@ better representation. A falling RankMe is therefore not automatically
 |---|---|---|
 | K-sector store | `/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr` | 923 frames, `(N,2,507,456,16)` f32, 23 GB, **raw sums** |
 | local staged copy | `/tmp/wi8_fsa_k16.zarr` | **ephemeral** — wiped on container restart |
+| per-pixel label maps | `/mnt/home/benbarkow/stores/wi8_label_maps/` | 923 frames, 1.9 GB — `seg` `(N,507,456)` u8, `sos` `(N,32,32)` f32, `bmode`/`bmode_focused` `(N,507,456)` f32. Read with `ssl_us.data.label_maps.open_label_maps` |
 | VICReg K=4 | `checkpoints/wi12_vicreg_policy{A,B}/` | |
 | VICReg K=16, K=1 | `checkpoints/wi13_vicreg_k{16,1}_policy{A,B}/` | |
 | MAE normalized | `checkpoints/wi14_mae_k4/` | trains on noise — see §4 |
@@ -235,7 +236,7 @@ health by the log's pairs/s, not instantaneous utilisation); MAE ~1750 crops/s.
 
 ```bash
 source /opt/venvs/.venv/bin/activate          # PyTorch; .venv-zea for beamforming
-pytest -q                                     # 271 passed, 6 skipped (skips = data/rats/)
+pytest -q                                     # 283 passed, 6 skipped (skips = data/rats/)
 ruff check .
 
 setsid nohup bash scripts/wi12_run_both.sh   >> logs/wi12_night.log 2>&1 </dev/null &   # VICReg K=4 A,B
@@ -245,6 +246,10 @@ setsid nohup bash scripts/wi14_run.sh 4      >> logs/wi14_chain.log 2>&1 </dev/n
 python scripts/wi13_matrix.py --k 4 --split train --crops-per-frame 8 --out figures/wi13_k4_train
 python scripts/wi14_mask_sweep.py --out figures/wi14_sweep
 bash scripts/wi12_status.sh                   # read-only health summary
+
+# per-pixel label maps (data instance; ~34 min, resumable, re-verify with --verify-only)
+HF_HOME=/tmp/hf_home HF_DATASETS_CACHE=/tmp/hf_datasets_cache \
+  python scripts/wi13_fetch_label_maps.py --out /mnt/home/benbarkow/stores/wi8_label_maps
 ```
 
 Crop geometry is always derived from K by `LoaderConfig.for_arm` — never pass
@@ -258,14 +263,63 @@ on crops it never saw.
 | # | item | where | cost |
 |---|---|---|---|
 | 1 | **Write-up.** Results exist only as JSON + tables. Nothing outside this repo is readable. | — | — |
-| 2 | Crop-level anatomy targets (`contains_cyst`, crop `cyst_fraction`, crop `sos_mean`) need per-pixel `seg`/`sos` maps. `data/` is empty here; only the store survived. Check whether the small maps can be fetched without all 271 GB. | `data` instance | I/O hours |
+| 2 | ~~Fetch the per-pixel `seg`/`sos` maps.~~ **DONE 2026-08-15** — see §9. Remaining: wire `label_maps.crop_labels` into `wi13_matrix.py` so the three blocked cells actually run. | `data` instance | ~1 h |
 | 3 | MAE at patch 4 as a full run — the only config that showed signal | `24g` | ~4 h+ |
 | 4 | WI-15 cross-aperture arm (optional in PLAN.md) | `24g` | ~3 h |
 | 5 | WI-9 HuggingFace publication (distribution, not science) | `data` | — |
 | 6 | K = 8 column — dropped per PLAN.md §5.5 cut-list item 4 | — | — |
+
+Stanford (`data/rats/*.mat`, WI-16) is still not on the cluster and has no
+remote source I could find. The retired HF dataset `benbarkow/us-ssl-mf` holds
+the same 168 frames as `(168,192,192,3,2,215)` IQ zarr (30.7 GB, HVMux already
+combined) — but cut at 860 samples and **decimated 4× in fast time**, so it is
+a lossy derivative of the raw `.mat` that PLAN.md's WI-16 assumes. Deliberately
+not downloaded; the raw files need to come off the Mac.
 
 Open question worth stating plainly: **every trained encoder ties or loses to
 `trivial` on `phase_error`** at K=4/K=1 — two numbers, envelope mean and std,
 handicapped 32:1 by `capacity_control`. Only K=16 Policy A clears it. Either
 phase error is not recoverable from these crops beyond global brightness, or
 the probe protocol is not the right instrument for it.
+
+---
+
+## 9. The per-pixel label maps (2026-08-15)
+
+The three crop-level anatomy targets were blocked because the store carries
+frame-level *scalars* only. They are no longer blocked, and it did not cost a
+re-download.
+
+**The corpus never needed re-fetching.** `iq_real`/`iq_imag` are 265.4 MB of
+each frame's 267.5 MB; parquet is columnar, so a column-pruned read over HTTP
+range requests takes **1.9 GB instead of 271 GB**. 923 frames in **33.6 min**
+on the `data` instance, ~1 MB/s decoded, dominated by per-shard overhead
+(45 s per 19-row train shard, 3 s per 1-row validation shard) rather than
+bandwidth. `pre_buffer=True` made no measurable difference — don't bother.
+This is the same technique every number in PLAN.md §2 was measured with;
+`scripts/wi13_fetch_label_maps.py` is now the durable version of it.
+
+**Alignment is asserted, not assumed.** Frame ids are `"{split}/{index}"`, the
+convention `wi8_build.py` assigns, so row *i* is store frame *i* — and the
+fetch re-derives `cyst_fraction`, `sos_mean`, `sos_std`, `phase_error` and `t0`
+from the fetched maps and compares them to the store's independently-written
+`frame_metadata.json`. All 923 agree; worst relative error **1.2e-7** (float32
+round-trip), `cyst_fraction` and `t0` exact. It also recovers **75 empty
+segmentation maps**, matching PLAN.md §2's independently measured 75/923.
+A misalignment here would attach the wrong anatomy to every crop and look
+entirely plausible downstream, so the check is fatal and runs by default.
+
+Re-read of PLAN.md §2.4's numbers straight off the fetched arrays, all
+reproduced exactly: cyst fraction over the 848 non-empty frames median 3.8 %,
+IQR 2.2–5.7 %, max 14.4 %; SoS global 1283.3–1629.5 m/s, frame means
+1380.8–1530.8 (σ_between 47.1), σ_within 3.7–28.6.
+
+**Reading them.** `ssl_us.data.label_maps.open_label_maps()` memory-maps the
+four arrays and refuses to open an unfinished or unverified directory — the
+`.npy` files are allocated at full size up front, so un-fetched frames read
+back as **zeros**, i.e. an empty cyst mask and a 0 m/s sound speed, neither of
+which looks like an error at the probe. `crop_labels(frame_ids, origins, size)`
+takes the `(row, col)` origins `StoreCropBatch` already records — not the mm
+centres, because recovering the origin from those means inverting the grid
+mapping approximately and a half-pixel slip shifts every mask. `to_bootstrap()`
+hands the WI-2 harness the real corpus in the shape it expects.
