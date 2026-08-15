@@ -53,13 +53,21 @@ def main() -> int:
     p.add_argument("--crops-per-frame", type=int, default=64, dest="crops_per_frame")
     p.add_argument("--k", type=int, default=4)
     p.add_argument("--timeout", type=int, default=1800, help="seconds per config")
+    p.add_argument("--only-patch", type=int, nargs="+", default=None, dest="only_patch",
+                   help="restrict to these patch sizes, for re-running failed cells")
+    p.add_argument("--batch-size", type=int, default=256, dest="batch_size",
+                   help="lower it for the token-heavy cells if VRAM is tight")
     args = p.parse_args()
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     results = []
 
-    for patch, mask in CONFIGS:
+    configs = CONFIGS
+    if args.only_patch:
+        configs = [c for c in CONFIGS if c[0] in args.only_patch]
+
+    for patch, mask in configs:
         tokens = (128 // patch) ** 2
         label = f"p{patch}_m{int(mask * 100)}"
         print(f"\n=== {label}: {tokens} tokens, {int(tokens * (1 - mask))} visible ===",
@@ -72,6 +80,7 @@ def main() -> int:
                 "--crops-per-frame", str(args.crops_per_frame),
                 "--epochs", str(args.epochs), "--warmup-epochs", "1",
                 "--patch-size", str(patch), "--mask-ratio", str(mask),
+                "--batch-size", str(args.batch_size),
                 "--log-every-steps", "0", "--no-wandb",
             ]
             try:
@@ -106,7 +115,15 @@ def main() -> int:
               f"{row['variance_explained'] * 100:+.1f}% | RankMe "
               f"{row['rankme_first']:.0f} -> {row['rankme_final']:.0f}", flush=True)
 
-    (out_dir / "sweep.json").write_text(json.dumps(results, indent=1))
+    # Merge with any previous sweep so re-running failed cells does not discard
+    # the cells that already succeeded.
+    existing = []
+    sweep_path = out_dir / "sweep.json"
+    if sweep_path.exists():
+        existing = [r for r in json.loads(sweep_path.read_text())
+                    if (r["patch"], r["mask"]) not in {(x["patch"], x["mask"]) for x in results}]
+    results = sorted(existing + results, key=lambda r: (-r["patch"], -r["mask"]))
+    sweep_path.write_text(json.dumps(results, indent=1))
 
     print("\n=== summary (variance explained; >0 means it learned something) ===")
     print(f"{'config':<12}{'tokens':>8}{'visible':>9}{'min loss':>10}{'var expl':>10}{'RankMe':>9}")
