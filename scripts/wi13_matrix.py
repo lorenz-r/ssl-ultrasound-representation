@@ -41,6 +41,7 @@ from ssl_us.eval.cluster import cluster_report
 from ssl_us.eval.guards import LabelLeakageError, filter_targets
 from ssl_us.eval.probes import probe
 from ssl_us.eval.store_features import (
+    MAECheckpointEncoder,
     StoreCropSpec,
     VICRegCheckpointEncoder,
     sample_store_crops,
@@ -101,6 +102,18 @@ def build_encoders(args, in_channels: int) -> dict:
         encoders[f"vicreg_{policy}"] = VICRegCheckpointEncoder(
             ckpt, in_channels=in_channels, device=args.device
         )
+    # WI-14's MAE baseline, when one has been trained for this K. This is the
+    # comparison PLAN.md WI-14 exists for: the pivot to joint embedding rests
+    # on MAE underperforming it on linear probing, measured on *this* data.
+    mae_ckpt = Path(args.checkpoint_root) / f"wi14_mae_k{args.k}" / "last.pt"
+    if mae_ckpt.exists():
+        print(f"[wi13] mae: {mae_ckpt}")
+        encoders["mae"] = MAECheckpointEncoder(
+            mae_ckpt, in_channels=in_channels, device=args.device
+        )
+    else:
+        print(f"[wi13] no MAE checkpoint for K={args.k} at {mae_ckpt} — skipping")
+
     # The floor: same architecture, same input, never trained. If a trained arm
     # cannot beat this, it learned nothing that the architecture did not supply.
     encoders["random_resnet18"] = feat.RandomResNet18(
@@ -221,6 +234,7 @@ def main() -> int:
         if not (a and b):
             continue
         rand = by_key.get(("random_resnet18", target))
+        mae = by_key.get(("mae", target))
         contrast.append({
             "target": target,
             "level": level,
@@ -234,6 +248,11 @@ def main() -> int:
                 a["score_hi"] < b["score_lo"] or b["score_hi"] < a["score_lo"]
             ),
             "random_baseline": rand["score"] if rand else None,
+            # WI-14: does joint embedding actually beat masked autoencoding here?
+            "mae": mae["score"] if mae else None,
+            "best_vicreg_beats_mae": (
+                None if mae is None else bool(max(a["score"], b["score"]) > mae["score"])
+            ),
             # A trained arm that cannot clear an untrained one of the same
             # architecture has learned nothing for this target.
             "beats_random": (
@@ -293,7 +312,8 @@ def main() -> int:
 def _write_tables(results, contrast, not_run, path: Path) -> None:
     lines = ["# WI-13 results matrix (K=4)", "", "## Policy A vs Policy B", ""]
     cols = ["target", "level", "metric", "policy_a", "policy_b",
-            "delta_b_minus_a", "separated", "random_baseline", "beats_random"]
+            "delta_b_minus_a", "separated", "random_baseline", "beats_random",
+            "mae", "best_vicreg_beats_mae"]
     lines += ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
     for c in contrast:
         lines.append("| " + " | ".join(

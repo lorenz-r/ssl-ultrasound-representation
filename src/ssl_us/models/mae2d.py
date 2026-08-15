@@ -145,6 +145,25 @@ class MAE2D(nn.Module):
         x = x.permute(0, 2, 3, 1, 4, 5).reshape(b, self.n_tokens, c * p * p)
         return x
 
+    @property
+    def dim(self) -> int:
+        """Width of the representation `encode` returns, mirroring
+        `ResNetBackbone.dim` so probes can treat the two arms alike."""
+        return self.patch_embed.proj.out_features
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """``(B, embed_dim)`` representation for probing — **no masking**.
+
+        This is what the linear probes read, and it is deliberately not
+        `forward`: `forward` masks 75 % of the tokens because that is the
+        pretext task, but a representation scored against another encoder must
+        see the whole crop, exactly as the VICReg backbone does. Tokens are
+        mean-pooled because this MAE has no CLS token; that is the standard
+        alternative and is what `dim` reports the width of.
+        """
+        tokens = self.patch_embed(x) + self.pos_embed
+        return self.encoder(tokens).mean(dim=1)
+
     def forward(self, x: torch.Tensor, generator: torch.Generator | None = None):
         """Returns ``(pred, target, mask)`` — ``pred``/``target`` are
         ``(B, N, patch_dim)``; ``mask`` is ``(B, N)``, 1 where masked (i.e.

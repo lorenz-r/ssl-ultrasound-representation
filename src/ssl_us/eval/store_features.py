@@ -27,6 +27,7 @@ vs Policy B contrast is a difference in learned weights and nothing else.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -200,4 +201,61 @@ class VICRegCheckpointEncoder:
         for i in range(0, len(crops), self.batch_size):
             x = torch.from_numpy(crops[i : i + self.batch_size]).to(self.device)
             out.append(self.model(x).float().cpu().numpy())
+        return np.concatenate(out)
+
+
+class MAECheckpointEncoder:
+    """Frozen encoder features from a WI-14 MAE checkpoint.
+
+    Calls `MAE2D.encode` — the **unmasked** path. `forward` masks 75 % of the
+    tokens because that is the pretext task, and probing it would score the
+    reconstruction problem rather than the representation, which is not what
+    WI-14's comparison against VICReg is asking.
+
+    The architecture is read from `run_config.json` beside the checkpoint
+    rather than assumed, because patch size, mask ratio and crop size are all
+    run-time choices and a mismatch would fail as a shape error at best and a
+    silently different model at worst.
+    """
+
+    def __init__(
+        self,
+        checkpoint: str | Path,
+        in_channels: int,
+        device: str = "cuda",
+        batch_size: int = 256,
+    ):
+        from ..models.mae2d import MAE2D
+
+        checkpoint = Path(checkpoint)
+        config_path = checkpoint.parent / "run_config.json"
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"{config_path} is required to rebuild the MAE architecture for {checkpoint}"
+            )
+        cfg = json.loads(config_path.read_text())
+        if cfg["in_channels"] != in_channels:
+            raise ValueError(
+                f"checkpoint was trained with in_channels={cfg['in_channels']}, "
+                f"but the crops supply {in_channels} — wrong K for this checkpoint"
+            )
+        state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        model = MAE2D(
+            in_channels=in_channels,
+            img_size=cfg["crop_size"],
+            patch_size=cfg["patch_size"],
+            mask_ratio=cfg["mask_ratio"],
+        )
+        model.load_state_dict(state["model"])
+        self.epoch = int(state.get("epoch", -1))
+        self.model = model.to(device).eval()
+        self.device = device
+        self.batch_size = batch_size
+
+    @torch.no_grad()
+    def __call__(self, crops: np.ndarray) -> np.ndarray:
+        out = []
+        for i in range(0, len(crops), self.batch_size):
+            x = torch.from_numpy(crops[i : i + self.batch_size]).to(self.device)
+            out.append(self.model.encode(x).float().cpu().numpy())
         return np.concatenate(out)

@@ -138,3 +138,64 @@ def test_mae_training_reduces_loss(tiny_mae):
 def test_mae_rejects_img_size_not_divisible_by_patch_size():
     with pytest.raises(ValueError, match="divisible"):
         MAE2D(in_channels=2, img_size=30, patch_size=8)
+
+
+# --- WI-14: the probe-facing representation -------------------------------
+
+
+def test_encode_is_unmasked_and_deterministic():
+    """`encode` must see the whole crop, unlike `forward`.
+
+    `forward` masks 75 % of tokens because that is the pretext task. Probing
+    that path would score the reconstruction problem rather than the
+    representation, and would also be non-deterministic run to run.
+    """
+    torch.manual_seed(0)
+    model = MAE2D(in_channels=4, img_size=32, patch_size=8, embed_dim=16,
+                  depth=1, heads=2, decoder_embed_dim=8, decoder_depth=1,
+                  decoder_heads=2).eval()
+    x = torch.randn(3, 4, 32, 32)
+
+    with torch.no_grad():
+        h1 = model.encode(x)
+        h2 = model.encode(x)
+
+    assert h1.shape == (3, model.dim) == (3, 16)
+    # Deterministic: no masking, so repeated calls agree exactly.
+    torch.testing.assert_close(h1, h2)
+
+
+def test_encode_depends_on_every_patch():
+    """No token is ignored — masking must not leak into the encode path."""
+    torch.manual_seed(0)
+    model = MAE2D(in_channels=2, img_size=32, patch_size=8, embed_dim=16,
+                  depth=1, heads=2, decoder_embed_dim=8, decoder_depth=1,
+                  decoder_heads=2).eval()
+    x = torch.zeros(1, 2, 32, 32)
+    with torch.no_grad():
+        base = model.encode(x)
+    # Perturb each patch position in turn; every one must move the output.
+    for row in range(0, 32, 8):
+        for col in range(0, 32, 8):
+            probe_x = x.clone()
+            probe_x[:, :, row : row + 8, col : col + 8] = 5.0
+            with torch.no_grad():
+                out = model.encode(probe_x)
+            assert not torch.allclose(out, base), f"patch at ({row},{col}) ignored"
+
+
+def test_mae_loss_scores_only_masked_patches():
+    """Changing a *visible* patch's prediction must not change the loss."""
+    torch.manual_seed(0)
+    pred = torch.randn(2, 4, 6)
+    target = torch.randn(2, 4, 6)
+    mask = torch.tensor([[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0]])
+
+    before = mae_loss(pred, target, mask)
+    bumped = pred.clone()
+    bumped[0, 1] += 100.0  # a visible patch for sample 0
+    assert torch.allclose(before, mae_loss(bumped, target, mask))
+
+    bumped2 = pred.clone()
+    bumped2[0, 0] += 100.0  # a masked patch
+    assert mae_loss(bumped2, target, mask) > before
