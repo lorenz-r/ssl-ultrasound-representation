@@ -102,17 +102,23 @@ def build_encoders(args, in_channels: int) -> dict:
         encoders[f"vicreg_{policy}"] = VICRegCheckpointEncoder(
             ckpt, in_channels=in_channels, device=args.device
         )
-    # WI-14's MAE baseline, when one has been trained for this K. This is the
-    # comparison PLAN.md WI-14 exists for: the pivot to joint embedding rests
-    # on MAE underperforming it on linear probing, measured on *this* data.
-    mae_ckpt = Path(args.checkpoint_root) / f"wi14_mae_k{args.k}" / "last.pt"
-    if mae_ckpt.exists():
-        print(f"[wi13] mae: {mae_ckpt}")
-        encoders["mae"] = MAECheckpointEncoder(
-            mae_ckpt, in_channels=in_channels, device=args.device
-        )
-    else:
-        print(f"[wi13] no MAE checkpoint for K={args.k} at {mae_ckpt} — skipping")
+    # WI-14's MAE baselines, when trained for this K. Both target variants are
+    # probed because they are not interchangeable on speckle: `norm_pix_loss`
+    # divides each patch by its own std, and the per-patch scale is the *only*
+    # predictable component here (neighbour correlation 0.87 lateral / 0.64
+    # axial, against 0.000 for the normalised within-patch pattern). The
+    # normalised arm therefore trains on pure noise, and the raw arm is the
+    # fair MAE baseline for this data even though it is not the paper default.
+    for suffix, name in ((f"wi14_mae_k{args.k}", "mae_norm"),
+                         (f"wi14_mae_k{args.k}_rawtarget", "mae_raw")):
+        mae_ckpt = Path(args.checkpoint_root) / suffix / "last.pt"
+        if mae_ckpt.exists():
+            print(f"[wi13] {name}: {mae_ckpt}")
+            encoders[name] = MAECheckpointEncoder(
+                mae_ckpt, in_channels=in_channels, device=args.device
+            )
+        else:
+            print(f"[wi13] no {name} checkpoint for K={args.k} — skipping")
 
     # The floor: same architecture, same input, never trained. If a trained arm
     # cannot beat this, it learned nothing that the architecture did not supply.
@@ -234,7 +240,7 @@ def main() -> int:
         if not (a and b):
             continue
         rand = by_key.get(("random_resnet18", target))
-        mae = by_key.get(("mae", target))
+        mae = by_key.get(("mae_raw", target)) or by_key.get(("mae_norm", target))
         contrast.append({
             "target": target,
             "level": level,

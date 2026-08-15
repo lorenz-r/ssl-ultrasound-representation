@@ -10,6 +10,8 @@
  "encoders": [
   "vicreg_A",
   "vicreg_B",
+  "mae_norm",
+  "mae_raw",
   "random_resnet18",
   "pca_raw",
   "trivial"
@@ -256,6 +258,204 @@
    "stage": "c0_const",
    "score_lo": -0.0029571907727583393,
    "score_hi": -0.00048087204258123213
+  },
+  {
+   "encoder": "mae_norm",
+   "target": "phase_error",
+   "level": "frame",
+   "metric": "r2",
+   "score": 0.2596,
+   "ci95": "[0.113, 0.363]",
+   "mae": 0.1953,
+   "n_eff": 93,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": 0.11265436236953567,
+   "score_hi": 0.3628207276943423,
+   "oracle_r2": 0.585,
+   "beats_oracle": false
+  },
+  {
+   "encoder": "mae_norm",
+   "target": "t0_group",
+   "level": "frame",
+   "metric": "balanced_accuracy",
+   "score": 0.2954,
+   "ci95": "[0.224, 0.366]",
+   "n_eff": 93,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": 0.22365917865917867,
+   "score_hi": 0.36605229120473015
+  },
+  {
+   "encoder": "mae_norm",
+   "target": "sos_mean_frame",
+   "level": "frame",
+   "metric": "r2",
+   "score": 0.6607,
+   "ci95": "[0.547, 0.754]",
+   "mae": 21.0568,
+   "n_eff": 93,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": 0.5473381599720756,
+   "score_hi": 0.7537728393054086
+  },
+  {
+   "encoder": "mae_norm",
+   "target": "sos_std_frame",
+   "level": "frame",
+   "metric": "r2",
+   "score": 0.1629,
+   "ci95": "[0.006, 0.275]",
+   "mae": 2.8545,
+   "n_eff": 93,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": 0.005632284727475201,
+   "score_hi": 0.27487806311627766
+  },
+  {
+   "encoder": "mae_norm",
+   "target": "cyst_fraction",
+   "level": "frame",
+   "metric": "r2",
+   "score": -0.0009,
+   "ci95": "[-0.077, 0.042]",
+   "mae": 0.0199,
+   "n_eff": 93,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": -0.07729607988354864,
+   "score_hi": 0.042071458207395176
+  },
+  {
+   "encoder": "mae_norm",
+   "target": "z_centre",
+   "level": "crop",
+   "metric": "r2",
+   "score": 0.3118,
+   "ci95": "[0.284, 0.337]",
+   "mae": 5.9419,
+   "n_eff": 2976,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": 0.2839460334239543,
+   "score_hi": 0.33746209450568954
+  },
+  {
+   "encoder": "mae_norm",
+   "target": "x_centre",
+   "level": "crop",
+   "metric": "r2",
+   "score": -0.0014,
+   "ci95": "[-0.004, -0.000]",
+   "mae": 6.5414,
+   "n_eff": 2976,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": -0.0035805451139630908,
+   "score_hi": -0.00016398715599653715
+  },
+  {
+   "encoder": "mae_raw",
+   "target": "phase_error",
+   "level": "frame",
+   "metric": "r2",
+   "score": 0.3141,
+   "ci95": "[0.138, 0.424]",
+   "mae": 0.1886,
+   "n_eff": 93,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": 0.1376029642438909,
+   "score_hi": 0.4239224324368347,
+   "oracle_r2": 0.585,
+   "beats_oracle": false
+  },
+  {
+   "encoder": "mae_raw",
+   "target": "t0_group",
+   "level": "frame",
+   "metric": "balanced_accuracy",
+   "score": 0.5333,
+   "ci95": "[0.475, 0.588]",
+   "n_eff": 93,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": 0.4752235586537912,
+   "score_hi": 0.587662037037037
+  },
+  {
+   "encoder": "mae_raw",
+   "target": "sos_mean_frame",
+   "level": "frame",
+   "metric": "r2",
+   "score": 0.7509,
+   "ci95": "[0.675, 0.811]",
+   "mae": 19.1937,
+   "n_eff": 93,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": 0.6747633203352685,
+   "score_hi": 0.8110801563082938
+  },
+  {
+   "encoder": "mae_raw",
+   "target": "sos_std_frame",
+   "level": "frame",
+   "metric": "r2",
+   "score": 0.2335,
+   "ci95": "[0.066, 0.343]",
+   "mae": 2.7945,
+   "n_eff": 93,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": 0.06581434390558918,
+   "score_hi": 0.3432378325145836
+  },
+  {
+   "encoder": "mae_raw",
+   "target": "cyst_fraction",
+   "level": "frame",
+   "metric": "r2",
+   "score": 0.0833,
+   "ci95": "[-0.074, 0.186]",
+   "mae": 0.0198,
+   "n_eff": 93,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": -0.07420105805769783,
+   "score_hi": 0.18585400830341825
+  },
+  {
+   "encoder": "mae_raw",
+   "target": "z_centre",
+   "level": "crop",
+   "metric": "r2",
+   "score": 0.379,
+   "ci95": "[0.351, 0.404]",
+   "mae": 5.6405,
+   "n_eff": 2976,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": 0.3514913178422986,
+   "score_hi": 0.4039694230624171
+  },
+  {
+   "encoder": "mae_raw",
+   "target": "x_centre",
+   "level": "crop",
+   "metric": "r2",
+   "score": 0.0027,
+   "ci95": "[-0.003, 0.008]",
+   "mae": 6.518,
+   "n_eff": 2976,
+   "n_feat": 64,
+   "stage": "c0_const",
+   "score_lo": -0.003120900371394314,
+   "score_hi": 0.0077773410409802835
   },
   {
    "encoder": "random_resnet18",
@@ -565,6 +765,8 @@
    "delta_b_minus_a": 0.1362,
    "separated": false,
    "random_baseline": 0.4759,
+   "mae": 0.3141,
+   "best_vicreg_beats_mae": true,
    "beats_random": false
   },
   {
@@ -576,6 +778,8 @@
    "delta_b_minus_a": 0.19159999999999994,
    "separated": true,
    "random_baseline": 0.438,
+   "mae": 0.5333,
+   "best_vicreg_beats_mae": true,
    "beats_random": true
   },
   {
@@ -587,6 +791,8 @@
    "delta_b_minus_a": -0.009099999999999997,
    "separated": false,
    "random_baseline": 0.7859,
+   "mae": 0.7509,
+   "best_vicreg_beats_mae": true,
    "beats_random": true
   },
   {
@@ -598,6 +804,8 @@
    "delta_b_minus_a": 0.20679999999999993,
    "separated": false,
    "random_baseline": 0.3966,
+   "mae": 0.2335,
+   "best_vicreg_beats_mae": true,
    "beats_random": true
   },
   {
@@ -609,6 +817,8 @@
    "delta_b_minus_a": -0.14599999999999996,
    "separated": false,
    "random_baseline": -0.0023,
+   "mae": 0.0833,
+   "best_vicreg_beats_mae": true,
    "beats_random": true
   },
   {
@@ -620,6 +830,8 @@
    "delta_b_minus_a": 0.031200000000000006,
    "separated": false,
    "random_baseline": 0.6027,
+   "mae": 0.379,
+   "best_vicreg_beats_mae": true,
    "beats_random": true
   },
   {
@@ -631,6 +843,8 @@
    "delta_b_minus_a": -0.525,
    "separated": true,
    "random_baseline": 0.1167,
+   "mae": 0.0027,
+   "best_vicreg_beats_mae": true,
    "beats_random": true
   }
  ],

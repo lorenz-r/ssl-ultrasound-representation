@@ -1,7 +1,9 @@
 # Cluster hand-off — status as of this session
 
 Written for whoever (human or agent) picks this up on the CUDA cluster next.
-**Read [PLAN.md](PLAN.md) first** — it is the actual design doc, with the
+**Start with [MEMORY.md](MEMORY.md)** — one file with every measured result
+from the training/eval session, what they mean, and what was got wrong along
+the way. Then **[PLAN.md](PLAN.md)** — it is the actual design doc, with the
 full reasoning, measured numbers, and revision history. This file is a map of
 what is built and what is left, in PLAN.md's own WI numbering.
 
@@ -14,7 +16,7 @@ full-corpus work was scoped out deliberately, not skipped by accident.
 **Phase 2 (cluster, TITAN RTX `24g`)** did the GPU and full-corpus work:
 WI-4's real-data gate (which had to be *rewritten* — see below) and WI-8's
 full 923-frame build, which now exists at
-`/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr`. **262 tests pass, `ruff
+`/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr`. **271 tests pass, `ruff
 check .` is clean, `pip install -e .` reproduces the environment** — no
 Poetry needed on the cluster; `pyproject.toml` declares its metadata in the
 standard PEP 621 `[project]` table, so plain `pip` builds it correctly
@@ -135,7 +137,7 @@ PLAN.md, not there.
 | WI-7 | Dataset-level RMS normalization | `src/ssl_us/data/normalization.py` | `test_normalization.py` (7) |
 | WI-11 | Augmentation Policies A & B | `src/ssl_us/data/augment.py` | `test_augment.py` (17) |
 | WI-12 | VICReg model, training loop, §4.7 instrumentation | `src/ssl_us/models/{resnet,vicreg}.py`, `src/ssl_us/train/{vicreg,instrument}.py`, `src/ssl_us/train/README.md` | `test_models.py` (12), `test_instrument.py` (10), `test_train_vicreg.py` (7), `test_wi12_eval_integration.py` (1) |
-| WI-14 | Spatial MAE baseline (documented baseline only) | `src/ssl_us/models/mae2d.py` | `test_mae2d.py` (12) |
+| WI-14 | Spatial MAE baseline — **trained and probed**, both target variants | `src/ssl_us/models/mae2d.py`, `src/ssl_us/train/mae.py`, `scripts/wi14_{train,run,mask_sweep}.*`, results in `tests/data/wi14_*.json` | `test_mae2d.py` (17), `test_train_mae.py` (4) |
 | WI-15 | Cross-aperture prediction arm (optional in the plan) | `src/ssl_us/models/xaperture.py` | `test_xaperture.py` (15) |
 | WI-16 | Stanford `.mat` reader + HVMux remap | `src/ssl_us/beamform/stanford_mat.py` | `test_stanford_mat.py` (12, run against the real files in `data/rats/`) |
 | WI-8 | Full K-sector store: per-frame beamforming, zarr store + reader, resumable build — **923/923 frames built** | `src/ssl_us/beamform/{frame,store}.py`, `scripts/wi8_{build,verify,profile}.py` | `test_store.py` (11), `test_wi8_build.py` (6) |
@@ -148,7 +150,7 @@ Every *test* above runs without a GPU or the full corpus — they use synthetic
 data, a small real download (a couple of NVIDIA frames), or the real local
 Stanford `.mat` files in `data/rats/`. ⚠ **`data/rats/` is not present on the
 cluster** (it was local to the phase-1 laptop), so `pytest -q` here reports
-**262 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
+**271 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
 cleanly. Re-download the Stanford `.mat` files before WI-16 work. The two exceptions are the artefacts
 rather than the tests: WI-4's gate numbers and WI-8's 923-frame store were
 both produced on a `24g` GPU instance against the full corpus.
@@ -715,7 +717,7 @@ image.
 
 ## Quick sanity checklist before starting new work
 
-- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 262 passed, 6 skipped
+- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 271 passed, 6 skipped
       (the 6 skips are `test_stanford_mat.py`, which needs `data/rats/*.mat`)
 - [ ] `ruff check .` → clean
 - [x] On a `12g`/`24g` instance: `nvidia-smi` works — confirmed, TITAN RTX
