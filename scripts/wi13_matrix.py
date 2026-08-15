@@ -2,17 +2,20 @@
 
 PLAN.md §5.2 WI-13 specifies
 ``(K ∈ {16,8,4,1}) × (policy A, B) × (§4.1 axes) × (probe, cluster)``. This
-script runs the **K = 4 column** — the two arms WI-12 actually trained — with
-the baselines, and reports the Policy A vs Policy B contrast as the deliverable
-WI-13's done-condition names.
+script runs **one K column per invocation** — both arms plus the baselines —
+and reports the Policy A vs Policy B contrast as the deliverable WI-13's
+done-condition names.
 
-    python scripts/wi13_matrix.py --out figures/wi13_k4
+    python scripts/wi13_matrix.py --k 4  --out figures/wi13_k4
+    python scripts/wi13_matrix.py --k 16 --out figures/wi13_k16
 
-Other K columns need their own VICReg runs: K sets the stem's input channel
-count (`Conv2d(2K, 64, …)`), so a K = 16 cell is a different model, not a
-different evaluation of this one. Cells that were not run are listed in
-`results.json` under `not_run` with a reason, per the done-condition's "no
-silent truncation".
+Each K needs its own trained pair, because K sets the stem's input channel
+count (`Conv2d(2K, 64, …)`) — a K = 16 cell is a different model, not a
+different evaluation of the K = 4 one. `scripts/wi13_kablation.sh` trains them.
+Crop geometry is **derived from K** via `LoaderConfig.for_arm`, the same call
+the training loader makes, so the encoder is never evaluated on crops it was
+not trained on. Cells that were not run are listed in `results.json` under
+`not_run` with a reason, per the done-condition's "no silent truncation".
 
 **Probing runs on the `validation` split by default** — the 93 frames the SSL
 encoders never saw. VICReg pre-training is label-free, so probing the train
@@ -30,6 +33,7 @@ from pathlib import Path
 import numpy as np
 
 from ssl_us.beamform.store import open_store
+from ssl_us.data.dataset import LoaderConfig
 from ssl_us.data.splits import outer_split
 from ssl_us.eval import features as feat
 from ssl_us.eval import viz
@@ -68,14 +72,32 @@ UNAVAILABLE_TARGETS = {
 PHASE_ERROR_ORACLE_R2 = 0.585  # measured: R^2(phase_error ~ sos_mean + sos_std)
 
 
+# Checkpoint directory layouts, tried in order. K=4 was trained by WI-12 and
+# lives under the wi12_* name; the K-ablation cells wi13_kablation.sh trains
+# carry K in their name. Ordered so an explicit per-K directory always wins.
+CKPT_TEMPLATES = (
+    "wi13_vicreg_k{k}_policy{policy}",
+    "wi12_vicreg_policy{policy}",
+)
+
+
+def find_checkpoint(root: str | Path, k: int, policy: str) -> Path | None:
+    for template in CKPT_TEMPLATES:
+        candidate = Path(root) / template.format(k=k, policy=policy) / "last.pt"
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def build_encoders(args, in_channels: int) -> dict:
     """Encoder name -> callable. Both arms go through the identical path."""
     encoders = {}
     for policy in ("A", "B"):
-        ckpt = Path(args.checkpoint_root) / f"wi12_vicreg_policy{policy}" / "last.pt"
-        if not ckpt.exists():
-            print(f"[wi13] policy {policy}: no checkpoint at {ckpt} — skipping")
+        ckpt = find_checkpoint(args.checkpoint_root, args.k, policy)
+        if ckpt is None:
+            print(f"[wi13] policy {policy}: no K={args.k} checkpoint found — skipping")
             continue
+        print(f"[wi13] policy {policy}: {ckpt}")
         encoders[f"vicreg_{policy}"] = VICRegCheckpointEncoder(
             ckpt, in_channels=in_channels, device=args.device
         )
@@ -95,8 +117,11 @@ def main() -> int:
     p.add_argument("--checkpoint-root", default=CKPT_ROOT, dest="checkpoint_root")
     p.add_argument("--out", default="figures/wi13_k4")
     p.add_argument("--k", type=int, default=4)
-    p.add_argument("--crop-size", type=int, default=128, dest="crop_size")
-    p.add_argument("--z-min-mm", type=float, default=0.0, dest="z_min_mm")
+    # Default None, then derived from K below — hardcoding 128/0.0 would have
+    # silently evaluated the K=16 arm on 128 px full-depth crops it was never
+    # trained on (it trains at 64 px below z=8 mm).
+    p.add_argument("--crop-size", type=int, default=None, dest="crop_size")
+    p.add_argument("--z-min-mm", type=float, default=None, dest="z_min_mm")
     p.add_argument("--crops-per-frame", type=int, default=16, dest="crops_per_frame")
     p.add_argument("--split", default="validation", choices=["validation", "train"])
     p.add_argument("--limit-frames", type=int, default=0, help="smoke testing only")
@@ -107,6 +132,17 @@ def main() -> int:
     p.add_argument("--device", default="cuda")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
+
+    # Geometry comes from LoaderConfig.for_arm — the same call the *training*
+    # loader uses — rather than a copy of §3.2c/d's rule here. Two copies would
+    # drift, and the failure is silent: the encoder would simply be evaluated on
+    # crops it never saw. Explicit flags still win, for ablations that
+    # deliberately vary one of them.
+    arm = LoaderConfig.for_arm(args.store, k=args.k)
+    if args.crop_size is None:
+        args.crop_size = arm.crop_size
+    if args.z_min_mm is None:
+        args.z_min_mm = arm.z_min_mm
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
