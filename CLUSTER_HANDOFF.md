@@ -141,7 +141,7 @@ PLAN.md, not there.
 | WI-8 | Full K-sector store: per-frame beamforming, zarr store + reader, resumable build — **923/923 frames built** | `src/ssl_us/beamform/{frame,store}.py`, `scripts/wi8_{build,verify,profile}.py` | `test_store.py` (11), `test_wi8_build.py` (6) |
 | WI-11/12 | Augmentation policies (**batched torch, GPU**) + store-backed crop loader with frame-cached shuffle buffer | `src/ssl_us/data/{augment,dataset}.py` | `test_augment.py` (24), `test_dataset.py` (12), `test_transforms.py` (18) |
 | WI-10 | Splits + leakage guard, **verified on the real 923-frame store**; per-run split-audit figure | `src/ssl_us/data/splits.py`, `src/ssl_us/eval/viz.py` (`plot_split_audit`), `scripts/wi10_splits.py` | `test_wi10_splits.py` (12), `test_guards.py` |
-| WI-13 | Results matrix, **K=4 column** — store-backed crops, frozen WI-12 encoders, A-vs-B contrast | `src/ssl_us/eval/store_features.py`, `scripts/wi13_matrix.py`, results in `tests/data/wi13_k4_results.json` | `test_store_features.py` (5) |
+| WI-13 | Results matrix, **K ∈ {1,4,16} × {A,B}** — store-backed crops, frozen WI-12 encoders, A-vs-B contrast | `src/ssl_us/eval/store_features.py`, `scripts/wi13_matrix.py`, results in `tests/data/wi13_k{1,4,16}_{train,validation}_results.json` | `test_store_features.py` (5) |
 | WI-0 | (pre-existing) NVIDIA frame verification | `scripts/wi0_probe.py` | `test_nv_frame.py` (8) |
 
 Every *test* above runs without a GPU or the full corpus — they use synthetic
@@ -510,91 +510,123 @@ Needs WI-8's output. Not started — no code written for the dataset card or
 the smoke-subset extraction. PLAN.md §5.2 WI-9 lists exactly what the card
 must contain (attribution, license, changes-made statement, etc.).
 
-### WI-13 — K=4 column DONE; the other K columns need their own training runs
+### WI-13 — DONE for the reduced ladder: K ∈ {1, 4, 16} × {A, B}, all probed
 
-Run it with:
+Six trained arms, all six probed on both splits. Per-column results are
+committed at `tests/data/wi13_k{1,4,16}_{train,validation}_results.json`
+(`figures/` is gitignored, so the JSON is the durable artifact). Re-run a
+column with:
 
 ```bash
-python scripts/wi13_matrix.py --split validation --crops-per-frame 32 \
-  --out figures/wi13_k4_validation
+python scripts/wi13_matrix.py --k 16 --split train --crops-per-frame 8 \
+  --out figures/wi13_k16_train
 ```
 
-Numbers below are on the **93 `validation` frames** (2976 crops) — the frames
-the SSL encoders never saw. VICReg pre-training is label-free so probing the
-train split would not leak labels, and SSL convention would allow it, but those
-images shaped the weights; `--split train` runs that in-sample version.
-Full output is committed at `tests/data/wi13_k4_results.json` (`figures/` is
-gitignored, so the JSON is the durable artifact).
+Crop geometry is derived from K by `LoaderConfig.for_arm` — never passed as a
+flag — so an encoder cannot be evaluated on crops it was not trained on.
 
-| target | A | B | random | trivial | arms clear controls? |
-|---|---|---|---|---|---|
-| phase_error | +0.265 | +0.401 | **+0.476** | **+0.503** | ✗ **no** |
-| t0_group † | +0.349 | **+0.541** | +0.438 | +0.392 | B only |
-| sos_mean_frame | **+0.890** | +0.881 | +0.786 | +0.679 | ✓ |
-| sos_std_frame | +0.308 | **+0.515** | +0.397 | +0.305 | B only |
-| cyst_fraction | **+0.464** | +0.318 | −0.002 | +0.288 | ✓ |
-| z_centre | +0.724 | **+0.755** | +0.603 | +0.515 | ✓ |
-| x_centre | **+0.524** | −0.001 | +0.117 | −0.001 | A only |
+#### ⚠ Read the columns down, not across
 
-R² except † (balanced accuracy). `pca_raw` is ≈0 on every target and is omitted.
+**K is confounded with crop geometry by design.** §3.2c/d ties K ≤ 4 to 128 px
+at full depth and K ≥ 8 to 64 px below z = 8 mm, because those are the
+*internally consistent* arms. So a K=16 cell differs from a K=4 cell in three
+ways at once (sector count, crop size, depth range), and cross-K differences
+cannot be attributed to K. The controls move too — `trivial` scores +0.400 on
+`phase_error` at K=4 but only +0.114 at K=16, because global brightness stops
+predicting phase error once crops are small and deep.
 
-**The 93-frame validation split is underpowered for the frame-level rows**, and
-that — not the encoders — is what made most cells look tied. Re-running on the
-830 `train` frames (`--split train --crops-per-frame 8`, ~10 min, no retraining;
-`tests/data/wi13_k4_train_results.json`) narrows the CIs from ±0.15 to ±0.05 and
-resolves **4 of 7** rows instead of 2:
+Each column is therefore scored **against its own controls**. Numbers are the
+830-frame train split; ✓/✗ is best-arm minus best-control.
 
-| target | A | B | random | trivial | separated (n=830) | (n=93) |
-|---|---|---|---|---|---|---|
-| phase_error | +0.366 | +0.438 | +0.393 | **+0.400** | no | no |
-| t0_group † | +0.398 | **+0.526** | +0.427 | +0.397 | **yes, B** | yes, B |
-| sos_mean_frame | **+0.899** | +0.865 | +0.800 | +0.671 | **yes, A** | no |
-| sos_std_frame | +0.277 | +0.339 | +0.273 | +0.280 | no | no |
-| cyst_fraction | +0.331 | +0.312 | +0.128 | +0.170 | no | no |
-| z_centre | +0.699 | **+0.756** | +0.645 | +0.541 | **yes, B** | no |
-| x_centre | **+0.537** | −0.001 | +0.177 | −0.000 | **yes, A** | yes, A |
+| target | K=1 A | K=1 B | vs ctrl | K=4 A | K=4 B | vs ctrl | K=16 A | K=16 B | vs ctrl |
+|---|---|---|---|---|---|---|---|---|---|
+| phase_error | +0.378 | +0.399 | ✓ +0.04 | +0.366 | +0.438 | ✓ +0.04 | **+0.377** | +0.247 | ✓ **+0.21** |
+| t0_group † | +0.407 | +0.495 | ✓ +0.12 | +0.398 | **+0.526** | ✓ +0.10 | +0.390 | +0.466 | ✓ +0.04 |
+| sos_mean_frame | +0.918 | +0.876 | ✓ +0.14 | +0.899 | +0.865 | ✓ +0.10 | **+0.931** | +0.849 | ✓ **+0.38** |
+| sos_std_frame | +0.294 | +0.322 | ✓ +0.08 | +0.277 | +0.339 | ✓ +0.06 | +0.335 | +0.162 | ✓ +0.19 |
+| cyst_fraction | **+0.365** | +0.223 | ✓ +0.23 | +0.331 | +0.312 | ✓ +0.16 | +0.214 | +0.126 | ✓ +0.10 |
+| z_centre | **+0.768** | +0.561 | ✓ +0.28 | +0.699 | +0.756 | ✓ +0.11 | +0.429 | +0.681 | ✓ +0.05 |
+| x_centre | +0.528 | −0.000 | ✓ +0.49 | +0.537 | −0.001 | ✓ +0.36 | **+0.789** | −0.000 | ✓ **+0.65** |
 
-That split is *in-sample* for the encoders (they saw those images, never the
-labels — no leak, and standard SSL protocol), so it is reported alongside the
-held-out numbers rather than instead of them. **The two agree closely** —
-sos_mean_frame 0.899 vs 0.890, x_centre 0.537 vs 0.524, z_centre 0.699 vs 0.724
-— which is itself a result: the encoders are not overfitting the frames they
-pre-trained on, so the cheap high-powered split can be trusted for ranking.
+R² except † (balanced accuracy). `pca_raw` is ≈0 everywhere and is omitted.
+**Every column clears its own controls on every target** — but by margins
+ranging from +0.04 to +0.65, and the small margins are the interesting ones.
 
-Net A-vs-B: **B wins `t0_group` and `z_centre`, A wins `sos_mean_frame` and
-`x_centre`**, and the other three are genuinely tied rather than merely noisy.
+#### Which arm wins, by 95 % CI separation
 
-Four things worth carrying forward:
+`-` means the intervals overlap, i.e. genuinely tied, not merely noisy.
 
-1. **Report separation, not ordering.** On the held-out split only `t0_group`
-   and `x_centre` separate at 95 % CI; at n = 830 that becomes those two plus
-   `sos_mean_frame` and `z_centre`. `phase_error`, `sos_std_frame` and
-   `cyst_fraction` stay tied even with 9× the power, so those three are
-   genuinely tied and not merely under-sampled.
-2. **Both arms fail the `phase_error` control, confirmed at high power.**
-   `trivial` — literally the mean and std of the crop envelope, two numbers —
-   matches or beats both arms on *both* splits (+0.400 vs A +0.366 / B +0.438
-   at n = 830). It is handicapped 32:1 by `capacity_control` (2 dims against
-   the encoders' 64) and still holds. That is PLAN.md §4.1's frame-level-cue
-   control doing exactly what it was put there to do: the encoders have not
-   learned phase error beyond global brightness. Treat this as a finding to
-   report, not a bug to fix.
-3. **Policy B carries no horizontal position** (x_centre R² ≈ 0) while A carries
-   a lot. That is the geometry-only augmentation behaving as specified, and it
-   is the cleanest demonstration in the matrix that the policy contrast bites.
-4. **Geometry explains only 7.9 %** of Policy A's feature variance, so the
+| target | K=1 (830 / 93) | K=4 (830 / 93) | K=16 (830 / 93) |
+|---|---|---|---|
+| phase_error | − / − | − / − | **A** / − |
+| t0_group | B / B | B / B | B / − |
+| sos_mean_frame | A / − | A / − | A / A |
+| sos_std_frame | − / − | − / − | A / − |
+| cyst_fraction | A / − | − / − | − / − |
+| z_centre | A / A | B / − | B / B |
+| x_centre | A / A | A / A | A / A |
+
+**The policies specialise, consistently and in opposite directions:**
+
+- **Policy A owns spatial and anatomical structure** — it wins `x_centre` at
+  every K without exception, `sos_mean_frame` at every K, and `cyst_fraction`
+  where that separates. Policy B's `x_centre` R² is **−0.000 at all three K**:
+  its features carry literally no horizontal position, which is the
+  geometry-only augmentation doing exactly what it was specified to do.
+- **Policy B owns acquisition metadata** — it wins `t0_group` at every K.
+
+That split is the cleanest result in the matrix and it is stable across K,
+across splits, and across the geometry confound.
+
+#### Four things worth carrying forward
+
+1. **Report separation, not ordering.** Rows marked `−` are tied even at
+   n = 830, so their A-vs-B ordering is not a finding. The 93-frame validation
+   split resolves far fewer rows; the 830-frame train split is the one to rank
+   on (see the power note below).
+2. **The `phase_error` control failure is a K=4/K=1 result, not a universal
+   one.** At K=4 the two-number `trivial` control (+0.400) matches both arms,
+   so the encoders have learned nothing about phase error beyond global
+   brightness — that is §4.1's control working. **At K=16 it reverses**: the
+   control collapses to +0.114 while Policy A holds +0.377, clearing by +0.21
+   and separating from B. On small deep crops, brightness stops being a
+   shortcut and the encoder is carrying real phase information. Do not quote
+   the K=4 conclusion as though it holds for the ladder.
+3. **`z_centre` inverts across the ladder** — A wins at K=1, B wins at K=4 and
+   K=16. Do not read this as a K effect: the K=16 crops only span z ≥ 8 mm, so
+   the target's own variance differs between columns.
+4. **Geometry explains only ~7–8 %** of Policy A's feature variance, so the
    representation is not merely encoding where the crop came from.
 
-**K ∈ {16, 1} are training now** (started 2026-08-14 23:14) via
-`scripts/wi13_kablation.sh` — 4 cells, sequential, checkpoints at
-`checkpoints/wi13_vicreg_k{16,1}_policy{A,B}`. Each K needs its own VICReg run
-because K sets the stem's input channel count (`Conv2d(2K, 64, …)`), so a K=16
-cell is a different model, not a different evaluation of this one. Geometry is
-derived from K by `LoaderConfig.for_arm`, never passed on the command line, so
-K and crop size cannot drift apart: K=16 → 64 px below z=8 mm, K=1 → 128 px at
-full depth. K=16 measured ~2790 pairs/s (the 64 px crop is 4× less GPU work per
-crop, so that arm is loader-bound at ~50 % GPU rather than compute-bound).
-Once they finish, re-run `wi13_matrix.py --k 16` / `--k 1` for those columns.
+#### Statistical power — use the train split for ranking
+
+The 93-frame validation split is underpowered for the five frame-level
+targets, and that, not the encoders, is what makes most cells look tied there.
+The 830-frame train split narrows CIs from ±0.15 to ±0.05 and resolves roughly
+twice as many rows. It is *in-sample* for the encoders (they saw those images,
+never the labels — no leak, and standard SSL protocol), so it is reported
+alongside the held-out numbers, never instead of them. **The two agree
+closely** at K=4 — sos_mean_frame 0.899 vs 0.890, x_centre 0.537 vs 0.524 —
+which is itself a result: no overfitting to the pre-training frames, so the
+cheap high-powered split can be trusted for ranking.
+
+#### Training cost, measured
+
+| cell | hours | crop | final loss | RankMe start → end |
+|---|---|---|---|---|
+| K=4 A | 1.53 | 128 | 8.33 | 286.1 → 287.1 |
+| K=4 B | 1.46 | 128 | 7.82 | 298.0 → 304.5 |
+| K=16 A | 1.20 | 64 | 8.63 | 347.0 → 298.7 |
+| K=16 B | 1.13 | 64 | 7.84 | 348.4 → 310.1 |
+| K=1 A | 1.93 | 128 | 8.60 | 264.0 → 289.6 |
+| K=1 B | 1.47 | 128 | 7.71 | 280.7 → 302.9 |
+
+Two patterns across all six: **Policy B always converges to lower loss and
+higher RankMe than A** — and it is *not* the better encoder for it, which is
+worth remembering before using training loss to pick an arm. And every arm
+lands in a narrow final RankMe band (289–310) regardless of start: K=16 comes
+*down* from ~347, K=1 climbs *up* from ~264. A falling RankMe is therefore not
+by itself a collapse signature; check where it started.
 
 **Not run, with reasons** (also machine-readable under `not_run` in the JSON):
 `K = 8` is dropped per PLAN.md §5.5's cut-list item 4. The crop-level
@@ -602,21 +634,6 @@ anatomy targets (`contains_cyst`, crop-level `cyst_fraction`, crop-level
 `sos_mean`) need the per-pixel `seg`/`sos` maps, which live in the source
 NVIDIA frames; `data/` is empty on this cluster and only the beamformed store
 survived, so they cannot be run without re-downloading.
-
-### WI-13 (original notes) — full results matrix
-
-**The store reader now exists** — `ssl_us.beamform.store.open_store` (WI-8), the
-piece this section previously flagged as missing.
-
-`eval/matrix.py` (WI-2) already runs the whole protocol end-to-end against
-`bmode`; running it against the real K-sector store instead is now mostly a
-matter of looping over `(K, policy)` cells per PLAN.md §5.2 WI-13. The probe
-protocol, guards, and baselines need no changes.
-
-`scripts/wi8_verify.py` shows the intended read path end to end (reduce the
-K-ladder, *then* normalize — never the reverse). `eval/matrix.py`'s
-`load_bootstrap` is the shape to match when wiring the matrix onto it.
-**No longer blocked** — the store exists (see WI-8 above).
 
 ### WI-16 — Stanford, past the reader
 
