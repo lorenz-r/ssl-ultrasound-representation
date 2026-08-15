@@ -105,6 +105,7 @@ class MAE2D(nn.Module):
         decoder_depth: int = 4,
         decoder_heads: int = 6,
         mask_ratio: float = 0.75,
+        norm_pix_loss: bool = True,
     ):
         super().__init__()
         if img_size % patch_size != 0:
@@ -114,6 +115,14 @@ class MAE2D(nn.Module):
         self.grid = img_size // patch_size
         self.n_tokens = self.grid * self.grid
         self.mask_ratio = mask_ratio
+        # He et al.'s "normalized pixels" target, on by default because they
+        # adopt it specifically to improve *linear probing* — the metric WI-14
+        # is measured on. With raw targets the loss is dominated by whichever
+        # patches happen to carry large amplitude, and on this zero-mean
+        # beamformed data the model parks at the patch mean: measured 11.3 %
+        # of masked-patch variance explained, loss flat from epoch 3, and
+        # RankMe decaying 331 -> 105 while it sat there.
+        self.norm_pix_loss = norm_pix_loss
         self.patch_dim = in_channels * patch_size * patch_size
 
         self.patch_embed = PatchEmbed(in_channels, patch_size, embed_dim)
@@ -184,6 +193,10 @@ class MAE2D(nn.Module):
         pred = self.decoder_pred(decoded)
 
         target = self.patchify(x)
+        if self.norm_pix_loss:
+            mean = target.mean(dim=-1, keepdim=True)
+            var = target.var(dim=-1, keepdim=True)
+            target = (target - mean) / (var + 1.0e-6).sqrt()
         return pred, target, mask
 
 

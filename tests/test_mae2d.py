@@ -199,3 +199,36 @@ def test_mae_loss_scores_only_masked_patches():
     bumped2 = pred.clone()
     bumped2[0, 0] += 100.0  # a masked patch
     assert mae_loss(bumped2, target, mask) > before
+
+
+def test_norm_pix_loss_standardises_the_target_per_patch():
+    """He et al.'s normalized-pixel target, on by default.
+
+    Without it the loss is dominated by high-amplitude patches and, on this
+    zero-mean beamformed data, the model parks at the patch mean — measured at
+    11.3 % of masked-patch variance explained with the loss flat from epoch 3.
+    """
+    torch.manual_seed(0)
+    x = torch.randn(2, 4, 32, 32) * 7.0 + 3.0  # deliberately off-scale
+
+    raw = MAE2D(in_channels=4, img_size=32, patch_size=8, embed_dim=16, depth=1,
+                heads=2, decoder_embed_dim=8, decoder_depth=1, decoder_heads=2,
+                norm_pix_loss=False)
+    _, target_raw, _ = raw(x)
+    assert target_raw.std() > 3.0
+
+    normed = MAE2D(in_channels=4, img_size=32, patch_size=8, embed_dim=16, depth=1,
+                   heads=2, decoder_embed_dim=8, decoder_depth=1, decoder_heads=2,
+                   norm_pix_loss=True)
+    _, target_normed, _ = normed(x)
+    # Standardised within each patch, not globally.
+    per_patch_mean = target_normed.mean(dim=-1)
+    per_patch_std = target_normed.std(dim=-1)
+    torch.testing.assert_close(per_patch_mean, torch.zeros_like(per_patch_mean), atol=1e-5, rtol=0)
+    torch.testing.assert_close(per_patch_std, torch.ones_like(per_patch_std), atol=1e-2, rtol=0)
+
+
+def test_norm_pix_loss_defaults_on():
+    assert MAE2D(in_channels=2, img_size=32, patch_size=8, embed_dim=16, depth=1,
+                 heads=2, decoder_embed_dim=8, decoder_depth=1,
+                 decoder_heads=2).norm_pix_loss is True

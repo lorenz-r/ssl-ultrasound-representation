@@ -100,6 +100,9 @@ def main() -> int:
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--mask-ratio", type=float, default=0.75, dest="mask_ratio")
     p.add_argument("--patch-size", type=int, default=16, dest="patch_size")
+    # He et al.'s normalized-pixel target, on by default — see mae2d.py for the
+    # measured reason (raw targets plateau at 11% variance explained here).
+    p.add_argument("--no-norm-pix-loss", action="store_true", dest="no_norm_pix_loss")
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--prefetch-factor", type=int, default=8)
     p.add_argument("--crops-per-frame", type=int, default=64, dest="crops_per_frame")
@@ -151,11 +154,13 @@ def main() -> int:
         flush=True,
     )
 
+    norm_pix_loss = not args.no_norm_pix_loss
     model = MAE2D(
         in_channels=cfg.in_channels,
         img_size=cfg.crop_size,
         patch_size=args.patch_size,
         mask_ratio=args.mask_ratio,
+        norm_pix_loss=norm_pix_loss,
     )
     print(f"[wi14] {model.n_tokens} tokens, encode dim {model.dim}", flush=True)
 
@@ -163,6 +168,7 @@ def main() -> int:
         "wi": 14, "arch": "mae2d", "k": args.k, "crop_size": cfg.crop_size,
         "in_channels": cfg.in_channels, "patch_size": args.patch_size,
         "mask_ratio": args.mask_ratio, "n_tokens": model.n_tokens,
+        "norm_pix_loss": norm_pix_loss,
         "batch_size": args.batch_size, "epochs": epochs, "steps_per_epoch": steps,
         "crops": crops, "lr": args.lr, "seed": args.seed,
         "n_train_frames": len(train_ids),

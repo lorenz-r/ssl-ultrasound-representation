@@ -245,6 +245,9 @@ class MAECheckpointEncoder:
             img_size=cfg["crop_size"],
             patch_size=cfg["patch_size"],
             mask_ratio=cfg["mask_ratio"],
+            # Does not affect `encode` (it only transforms the loss target),
+            # but carried through so the rebuilt model matches the run record.
+            norm_pix_loss=cfg.get("norm_pix_loss", True),
         )
         model.load_state_dict(state["model"])
         self.epoch = int(state.get("epoch", -1))
