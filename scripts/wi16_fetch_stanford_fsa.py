@@ -165,13 +165,18 @@ def time_of_sample_zero(path: Path, meta: sm.StanfordMetadata) -> float:
     """Two-way time of fast-time sample 0, seconds.
 
     `ProcessDataFSA_L12_3v.m` defines it as ``2*startDepth*lambda/c - offset``
-    with ``offset = (TW.peak + 2*lensCorrection)*lambda/c``. The lens/pulse-peak
+    with ``offset = (TW(1).peak + 2*lensCorrection)*lambda/c``. The lens/pulse-peak
     term is 1.77 us here — 1.4 mm of depth — so dropping it, as the NVIDIA path
     does by forcing ``t_peak = 0``, would misregister every Stanford pixel.
+
+    Read through `stanford_mat._scalar`: acquisitions with more than one `TW`
+    entry store `peak` as a MATLAB cell of object references rather than a
+    plain scalar, and ``float()`` on a raw `h5py.Reference` raises. Taking
+    ``.flat[0]`` matches the MATLAB, which indexes ``TW(1)``.
     """
     with h5py.File(path, "r") as f:
-        peak = float(np.asarray(f["TW"]["peak"][()]).flat[0])
-        lens = float(np.asarray(f["Trans"]["lensCorrection"][()]).flat[0])
+        peak = sm._scalar(f, f["TW"]["peak"])
+        lens = sm._scalar(f, f["Trans"]["lensCorrection"])
     return meta.t0_s - (peak + 2.0 * lens) * meta.wavelength_m / meta.c_m_s
 
 

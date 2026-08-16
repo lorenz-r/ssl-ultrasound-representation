@@ -236,3 +236,46 @@ def test_constant_attrs_are_a_subset_of_what_the_store_records(mod, tmp_path):
     assert set(mod.CONSTANT_ATTRS) <= emitted
     # and the manifest the build writes is JSON-serializable as declared
     json.dumps({"article": mod.ARTICLE, "version": mod.VERSION, "decim": mod.DECIM})
+
+
+# ── MATLAB v7.3 scalar reading ───────────────────────────────────────────────
+
+
+def _write_tw_file(path, peak, n_tw, lens):
+    """A minimal MATLAB-v7.3-shaped file: `TW.peak` as a cell of references
+    when there is more than one waveform, as a plain scalar when there is one."""
+    import h5py
+
+    with h5py.File(path, "w") as f:
+        refs = f.create_group("#refs#")
+        tw = f.create_group("TW")
+        if n_tw > 1:
+            targets = [
+                refs.create_dataset(f"p{i}", data=np.array([[peak + i]])) for i in range(n_tw)
+            ]
+            ds = tw.create_dataset(
+                "peak", shape=(n_tw, 1), dtype=h5py.special_dtype(ref=h5py.Reference)
+            )
+            for i, t in enumerate(targets):
+                ds[i, 0] = t.ref
+        else:
+            tw.create_dataset("peak", data=np.array([[peak]]))
+        f.create_group("Trans").create_dataset("lensCorrection", data=np.array([[lens]]))
+
+
+class _TimeMeta:
+    t0_s = 5.119672340970177e-07
+    wavelength_m = 1540.0 / 7.813e6
+    c_m_s = 1540.0
+
+
+@pytest.mark.parametrize("n_tw", [1, 2])
+def test_time_origin_reads_through_a_matlab_cell_reference(mod, tmp_path, n_tw):
+    """Some acquisitions carry two `TW` entries, which HDF5 stores as object
+    references; `float()` on a raw reference raises, and the whole build died
+    on file 25 of 117 the first time. MATLAB indexes `TW(1)`, so must we."""
+    path = tmp_path / f"tw{n_tw}.mat"
+    _write_tw_file(path, peak=1.79699, n_tw=n_tw, lens=6.0018045454545454)
+    t0 = mod.time_of_sample_zero(path, _TimeMeta())
+    assert t0 == pytest.approx(-1.2543964022666187e-06, rel=1e-9)
+    assert t0 < 0  # the lens/pulse-peak offset puts sample 0 before transmit
