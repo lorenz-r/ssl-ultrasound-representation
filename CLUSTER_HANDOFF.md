@@ -151,7 +151,7 @@ Every *test* above runs without a GPU or the full corpus — they use synthetic
 data, a small real download (a couple of NVIDIA frames), or the real local
 Stanford `.mat` files in `data/rats/`. ⚠ **`data/rats/` is not present on the
 cluster** (it was local to the phase-1 laptop), so `pytest -q` here reports
-**283 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
+**309 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
 cleanly. Re-download the Stanford `.mat` files before WI-16 work. The two exceptions are the artefacts
 rather than the tests: WI-4's gate numbers and WI-8's 923-frame store were
 both produced on a `24g` GPU instance against the full corpus.
@@ -648,26 +648,33 @@ has zero handling for aperture multiplexing — grepped for
 (`stanford_mat.combine_rx_halves`) is genuinely still needed; this isn't a
 temporary workaround.
 
-Not done: decoding Stanford's focused multi-focal transmits into multistatic
-form via `zea.ops.Refocus` (PLAN.md §0.4), then running the same
-`AngularSectorSum` pipeline on it, then the two grid-matching variants
-(mm-matched vs λ-matched, PLAN.md §3.6). This needs real `zea.ops.Refocus`
-API exploration (signature, inversion-method choice — adjoint/Tikhonov/
-rSVD/tSVD) that this session didn't have time for. `combine_rx_halves`
-hands back exactly the per-transmit 192-element complex IQ signal that
-should feed into it.
+**The remap is now confirmed by the probe itself, not just by the MATLAB
+reorder expression it was ported from.** `Trans.HVMux.ApertureES` in the
+figshare files is a (192 element × 65 aperture) table of element→channel
+assignments, and for every aperture it is exactly `chan = (elem - 1) % 128 + 1`
+— e.g. at aperture 65, elements 65–128 read channels 65–128 and elements
+185–192 read channels 57–64. That is the cyclic map `combine_rx_halves`
+implements, from the vendor's own table.
 
-**Also blocked on the data, and there is no remote copy of the raw files.**
-Searched 2026-08-15: no URL for the Stanford `.mat` set anywhere in this repo
-or its history. The nearest thing is the *retired* HF dataset
-`benbarkow/us-ssl-mf` — the same 168 frames as `rf_iq`
-`(168, 192, 192, 3, 2, 215)` float32 zarr, 30.7 GB, one chunk per frame, HVMux
-already combined, so it would feed `Refocus` directly. But it is cut at
-`depth_cutoff_samples = 860` and **decimated 4× in fast time**
-(`downsample_factor: 4` → 215 samples), which is a lossy derivative of what
-WI-16 assumes. Deliberately not downloaded. Copy `data/rats/*.mat` off the Mac
-instead; fall back to the HF copy only with that decimation stated in the
-write-up.
+**The `Refocus` step is deleted (2026-08-16).** The published source has native
+FSA acquisitions — see the corpus section below and PLAN.md §3.6's rev-6
+correction. No inversion, no method choice, no residual.
+
+**The corpus is built:** `/mnt/home/benbarkow/stores/wi16_stanford_fsa.zarr`,
+117 frames of `(192, 192, 287)` complex64 baseband IQ (~9 GB), read with
+`ssl_us.data.stanford_fsa.open_fsa_store`. Built by
+`scripts/wi16_fetch_stanford_fsa.py` on this `data` instance in ~70 min.
+
+Not done: the beamforming pass. `AngularSectorSum` applies unchanged — the
+store is already in NVIDIA's `(n_tx, n_rx, n_ax)` layout — but the constants
+differ (192 elements at 200.0 µm, fc 7.813 MHz, λ 197.1 µm, fs 10.42 MHz,
+`t0_s` **negative**), and both grid variants (mm-matched vs λ-matched,
+PLAN.md §3.6) still have to be built and gated. Needs `12g`.
+
+⚠ **Do not force `t_peak = 0` here.** That is right for NVIDIA (WI-4) and
+wrong for Stanford: the Verasonics time origin carries
+`(TW.peak + 2*lensCorrection)*λ/c` = 1.77 µs, about 1.4 mm of depth. The
+store's `t0_s` attribute already has it applied; use the attribute.
 
 ### Manual action (not code)
 

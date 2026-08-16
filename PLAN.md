@@ -755,6 +755,30 @@ both. Transfer is then matched on **three** axes — grid spacing, sector defini
 and transmit scheme — rather than one. This is a materially stronger position than
 rev-2's grid-matching alone.
 
+> **⚠ rev-6 correction (2026-08-16): Stanford is not only multi-focal, and
+> `Refocus` is not needed.** Every statement above about decoding focused
+> transmits was written from the phase-1 repo, which only ever handled the
+> MultiFocal acquisitions. The published source
+> ([figshare 28291985](https://doi.org/10.25452/figshare.plus.28291985),
+> *Pulse-Echo Ultrasound Murine In Vivo Acquisitions*, Apache-2.0) ships the
+> **same animals acquired three ways**: 117 FSA files (76.3 GB), 117 Hadamard,
+> and 81 MultiFocal + 33 MF_Fast. On the FSA files `TX.Apod` has exactly **one
+> non-zero element per transmit**, 192 transmits for 192 elements — natively
+> multistatic, exactly like NVIDIA's 180-transmit corpus.
+>
+> So the transmit axis is matched *by construction*, with no inversion step,
+> no choice of adjoint/Tikhonov/rSVD/tSVD, and no `Refocus` residual to
+> account for. §4.5a's "reciprocity will not hold on Stanford" loses one of its
+> three named causes. The MultiFocal path is not deleted — it stays available
+> as an ablation, and the Hadamard set is a third encoding of the same scenes —
+> but the headline transfer arm should be FSA-on-FSA.
+>
+> Two other numbers above need revising with it: Stanford's depth range is
+> **0.39–21.2 mm** (the publishers truncated every file at ~846 fast-time
+> samples; the "0–21.6 mm" figure came from the same truncation read through
+> the old pipeline), and the corpus is now **117 acquisitions over 30 inferred
+> sessions**, not 168 frames. See `scripts/wi16_fetch_stanford_fsa.py`.
+
 **⚠ Depth: mostly resolved by §3.2c.** NVIDIA spans **0–40 mm** and Stanford
 0–21.6 mm, so Stanford is entirely inside NVIDIA's extent. At **K ≤ 4 there is no
 restriction on either side** and the headline transfer number uses the full range
@@ -1734,18 +1758,34 @@ available and confirm the loss collapses, demonstrating the shortcut is real.
 
 **WI-16 — Stanford transfer eval. `[dep: WI-12]` — first-class deliverable, not optional**
 
-Per §3.6. Read the 168 Stanford frames with `zea/data/convert/verasonics.py`
-(verifying HVMux coverage first — §3.6), decode focused transmits to multistatic with
-`zea.ops.Refocus`, then beamform to the shared store format using the identical
-`AngularSectorSum` op. Run both grid variants (mm-matched and λ-matched) as an
-ablation. Frozen-feature probes only — no retraining.
+Per §3.6. **Rev-6: the `Refocus` step is deleted** — the source ships native FSA
+acquisitions, so the transmit representation already matches NVIDIA's (see §3.6's
+rev-6 correction). What remains is: read the FSA `.mat` files with
+`beamform/stanford_mat.py`'s HVMux recombination, then beamform to the shared store
+format using the identical `AngularSectorSum` op. Run both grid variants (mm-matched
+and λ-matched) as an ablation. Frozen-feature probes only — no retraining.
+
+**Step 1 is done (2026-08-16):** `scripts/wi16_fetch_stanford_fsa.py` builds the
+corpus at `/mnt/home/benbarkow/stores/wi16_stanford_fsa.zarr` — 117 frames of
+`(192, 192, 287)` baseband IQ, read with `data/stanford_fsa.open_fsa_store`. What is
+left is the beamforming pass, which needs a GPU instance.
 
 *Done when:* both grid variants are built; Stanford's own reference B-mode passes the
 same K=1 validation gate as WI-4; the headline transfer table uses the **full
-0–21.6 mm range at K ≤ 4** with the 8–21.6 mm restricted row reported alongside at
+0.4–21.2 mm range at K ≤ 4** with the 8–21.2 mm restricted row reported alongside at
 every K (the §4.5c falsification instrument); the 64-px secondary crop row is
-reported for K ≥ 8; and the Stanford probe axes (subject, file, depth, echogenicity)
+reported for K ≥ 8; and the Stanford probe axes (session, file, depth, echogenicity)
 are reported against the same baselines including random-init.
+
+⚠ **"Subject" is not a published field.** figshare flattened the per-rat directory
+tree its own `mainLoader.m` walks, so the corpus records an *inferred* `session`
+(acquisitions clustered by timestamp: 30 sessions over 117 files) and the exact
+`source_file`. Split on `session`, and do not claim it is an animal id. The
+per-animal ground truth that *is* published — ex vivo speed of sound, liver fat
+percentage, steatosis grade for 20 rats, in `SoSDataAll.xlsx` — cannot currently be
+joined to the acquisitions for the same reason. Recovering that join would turn
+Stanford from an unlabelled transfer corpus into one with a **real, non-simulated
+sound-speed target**, which is the most valuable single addition available to §4.1.
 
 ### 5.3 Sequencing by risk, and what gets cut first
 

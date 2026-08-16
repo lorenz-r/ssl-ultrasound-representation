@@ -32,8 +32,17 @@ rationale), the project pretrains on the simulated **NVIDIA
 [NV-Raw2Insights-US](https://huggingface.co/datasets/nvidia/NV-Raw2Insights-US)**
 corpus (923 k-Wave-simulated frames, dense physics ground truth: sound-speed field,
 cyst segmentation, phase error) and evaluates transfer on the real **Stanford
-RF channel data** in `data/rats/` (168 frames, in-vivo rat tissue). This is a
-sim-pretrain / real-probe structure, not a dataset switch — see PLAN.md §3.6.
+RF channel data** — 117 in-vivo rat acquisitions from
+[figshare 28291985](https://doi.org/10.25452/figshare.plus.28291985)
+(*Pulse-Echo Ultrasound Murine In Vivo Acquisitions*, Apache-2.0), built into a
+corpus by `scripts/wi16_fetch_stanford_fsa.py`. This is a sim-pretrain /
+real-probe structure, not a dataset switch — see PLAN.md §3.6.
+
+The transfer corpus uses that source's **FSA** acquisitions — one transmit per
+element, the same full-synthetic-aperture scheme as NVIDIA — rather than its
+MultiFocal ones, so no REFoCUS decoding step is needed. The `data/rats/*.mat`
+files referenced by `tests/test_stanford_mat.py` are a local phase-1 subset of
+the MultiFocal acquisitions; those tests skip when it is absent.
 
 The old Stanford-only MAE pipeline (`src/ssl_ultrasound_representation/`, the
 `benbarkow/us-ssl-mf` HF dataset) has been retired; it lives in git history on
