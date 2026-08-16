@@ -1,11 +1,14 @@
-# MEMORY — everything known as of 2026-08-15
+# MEMORY — everything known as of 2026-08-16
 
 One file, written to be read cold. It records **what was run, what was
 measured, what it means, and what I got wrong**. PLAN.md remains the design
 doc and CLUSTER_HANDOFF.md the per-WI map; this is the state of knowledge.
 
 Scope: the 2026-08-14/15 session on the cluster `24g` instance, which trained
-seven models (six VICReg arms + two MAE variants) and probed all of them.
+seven models (six VICReg arms + two MAE variants) and probed all of them
+(§1–§8); and the 2026-08-15/16 session on a `data` instance, which fetched the
+two corpora that were missing — NVIDIA's per-pixel label maps (§9) and the
+Stanford FSA transfer set (§10).
 
 ---
 
@@ -52,7 +55,7 @@ better representation. A falling RankMe is therefore not automatically
 | K-sector store | `/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr` | 923 frames, `(N,2,507,456,16)` f32, 23 GB, **raw sums** |
 | local staged copy | `/tmp/wi8_fsa_k16.zarr` | **ephemeral** — wiped on container restart |
 | per-pixel label maps | `/mnt/home/benbarkow/stores/wi8_label_maps/` | 923 frames, 1.9 GB — `seg` `(N,507,456)` u8, `sos` `(N,32,32)` f32, `bmode`/`bmode_focused` `(N,507,456)` f32. Read with `ssl_us.data.label_maps.open_label_maps` |
-| Stanford FSA corpus | `/mnt/home/benbarkow/stores/wi16_stanford_fsa.zarr` | 117 frames, `(N,192,192,287)` complex64, ~9 GB — baseband IQ, **not** beamformed. Read with `ssl_us.data.stanford_fsa.open_fsa_store`. See §10 |
+| Stanford FSA corpus | `/mnt/home/benbarkow/stores/wi16_stanford_fsa.zarr` | 117 frames, `(N,192,192,287)` complex64, 8.8 GB — baseband IQ, **not** beamformed. Read with `ssl_us.data.stanford_fsa.open_fsa_store`. See §10 |
 | VICReg K=4 | `checkpoints/wi12_vicreg_policy{A,B}/` | |
 | VICReg K=16, K=1 | `checkpoints/wi13_vicreg_k{16,1}_policy{A,B}/` | |
 | MAE normalized | `checkpoints/wi14_mae_k4/` | trains on noise — see §4 |
