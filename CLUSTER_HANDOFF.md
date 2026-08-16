@@ -151,7 +151,7 @@ Every *test* above runs without a GPU or the full corpus — they use synthetic
 data, a small real download (a couple of NVIDIA frames), or the real local
 Stanford `.mat` files in `data/rats/`. ⚠ **`data/rats/` is not present on the
 cluster** (it was local to the phase-1 laptop), so `pytest -q` here reports
-**309 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
+**311 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
 cleanly. Re-download the Stanford `.mat` files before WI-16 work. The two exceptions are the artefacts
 rather than the tests: WI-4's gate numbers and WI-8's 923-frame store were
 both produced on a `24g` GPU instance against the full corpus.

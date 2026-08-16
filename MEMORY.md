@@ -237,7 +237,7 @@ health by the log's pairs/s, not instantaneous utilisation); MAE ~1750 crops/s.
 
 ```bash
 source /opt/venvs/.venv/bin/activate          # PyTorch; .venv-zea for beamforming
-pytest -q                                     # 309 passed, 6 skipped (skips = data/rats/)
+pytest -q                                     # 311 passed, 6 skipped (skips = data/rats/)
 ruff check .
 
 setsid nohup bash scripts/wi12_run_both.sh   >> logs/wi12_night.log 2>&1 </dev/null &   # VICReg K=4 A,B
