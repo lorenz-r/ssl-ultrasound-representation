@@ -271,7 +271,7 @@ on crops it never saw.
 | # | item | where | cost |
 |---|---|---|---|
 | 1 | **Write-up.** Results exist only as JSON + tables. Nothing outside this repo is readable. | — | — |
-| 2 | ~~Fetch the per-pixel `seg`/`sos` maps.~~ **DONE 2026-08-15** — see §9. Remaining: wire `label_maps.crop_labels` into `wi13_matrix.py` so the three blocked cells actually run. | `data` instance | ~1 h |
+| 2 | ~~Fetch the per-pixel maps and wire them into `wi13_matrix.py`.~~ **DONE 2026-08-16** — see §9/§11. Remaining: *run* the columns, which belongs on a GPU box (minutes there, hours on `data`). | `24g` | ~10 min |
 | 3 | **WI-16 beamforming.** The Stanford FSA corpus is built (§10); turning it into K-sector stores — both grid variants — is not. `AngularSectorSum` applies unchanged; the constants and `t0_s` do not. | `12g` | ~2 h |
 | 4 | MAE at patch 4 as a full run — the only config that showed signal | `24g` | ~4 h+ |
 | 5 | WI-15 cross-aperture arm (optional in PLAN.md) | `24g` | ~3 h |
@@ -438,3 +438,52 @@ and it is exactly `chan = (elem − 1) % 128 + 1` for every aperture — at
 aperture 65, elements 65–128 read channels 65–128 and elements 185–192 read
 channels 57–64. The remap is right, from the vendor's table rather than by
 inference.
+
+---
+
+## 11. The crop-level anatomy cells now run (2026-08-16)
+
+WI-13 has reported three cells in `not_run` since it was written —
+`contains_cyst`, `cyst_fraction_crop`, `sos_mean_crop`. They are wired up
+against §9's maps and verified end to end; what is left is running the two
+columns on a GPU box.
+
+```bash
+python scripts/wi13_matrix.py --k 4 --split validation --crops-per-frame 32 --out figures/wi13_k4_validation
+python scripts/wi13_matrix.py --k 4 --split train      --crops-per-frame 8  --out figures/wi13_k4_train
+```
+
+Those are the settings the committed columns used, so the seven existing
+targets must reproduce **exactly** — same crops, same seed, same features. They
+are the check that adding the anatomy targets perturbed nothing. Repeat for
+K=16 and K=1 to fill the ablation.
+
+**Naming, deliberately.** The crop-level targets are suffixed `_crop`.
+`cyst_fraction` in every table above is the *frame-level* quantity from
+`frame_metadata.json`, and redefining that name would make old and new numbers
+look comparable when they are not.
+
+**Cyst probes drop the empty-`segmentation_map` frames** (PLAN.md §2.6: an
+empty mask is an unknown mix of true negatives and unlabelled edge-touching
+cysts). The mask is applied at the probe call site, not inside `probe`, and the
+dropped count is reported in the log and in `results.json`. `sos_mean_crop`
+keeps every crop — the sound-speed map is dense on those frames; only the
+segmentation is missing.
+
+### 11.1 Two things this cost, worth knowing
+
+1. **The `data` instance has a 4 GB cgroup, not the 31 GB `free` reports.**
+   Materializing all 6640 train crops is 3.5 GB and got OOM-killed. Check
+   `/sys/fs/cgroup/memory.max`, not `free`. Crops are now materialized
+   `--frame-chunk` frames at a time, and **origins are drawn for the whole
+   corpus before any pixel is read** (`sample_store_origins`) — sampling per
+   chunk would re-seed and silently give different crops. A test asserts a
+   per-frame chunked walk reproduces the whole-corpus call exactly.
+2. **`StoreCropBatch.__len__` read `images`.** Freeing them after feature
+   extraction therefore made every per-target mask zero-length, and every probe
+   was skipped with a PCA error rather than a mask error. It counts `frame_id`
+   now.
+
+Feature extraction on the `data` instance is ~3 min per 120 crops across seven
+encoders on **one core** — the `24g` box does the whole column in minutes.
+CLAUDE.md already maps results-matrix runs to `24g`; that is not a preference.
