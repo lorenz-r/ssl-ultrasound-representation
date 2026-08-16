@@ -17,6 +17,19 @@ the training loader makes, so the encoder is never evaluated on crops it was
 not trained on. Cells that were not run are listed in `results.json` under
 `not_run` with a reason, per the done-condition's "no silent truncation".
 
+**The crop-level anatomy axes need the per-pixel maps**, which are not in the
+store — `scripts/wi13_fetch_label_maps.py` fetches them and `--label-maps`
+points here. With them, `contains_cyst`, `cyst_fraction_crop` and
+`sos_mean_crop` run; without them they stay in `not_run` as before. The cyst
+probes exclude crops from the 75 empty-`segmentation_map` frames (PLAN.md
+§2.6), and say so in the output rather than silently shrinking.
+
+Crops are materialized `--frame-chunk` frames at a time. The full set is 3.5 GB
+at 830 frames x 8 crops, against a **4 GB cgroup** on the `data` instance —
+note `free` reports the host's 31 GB, not the limit that actually applies.
+Origins are drawn for the whole corpus before any pixel is read, so chunking
+cannot change which crops are used.
+
 **Probing runs on the `validation` split by default** — the 93 frames the SSL
 encoders never saw. VICReg pre-training is label-free, so probing the train
 frames would not leak *labels*, and the usual SSL convention would allow it;
@@ -34,6 +47,8 @@ import numpy as np
 
 from ssl_us.beamform.store import open_store
 from ssl_us.data.dataset import LoaderConfig
+from ssl_us.data.label_maps import DEFAULT_ROOT as LABEL_MAPS_DEFAULT_ROOT
+from ssl_us.data.label_maps import open_label_maps
 from ssl_us.data.splits import outer_split
 from ssl_us.eval import features as feat
 from ssl_us.eval import viz
@@ -42,6 +57,7 @@ from ssl_us.eval.guards import LabelLeakageError, filter_targets
 from ssl_us.eval.probes import probe
 from ssl_us.eval.store_features import (
     MAECheckpointEncoder,
+    StoreCropBatch,
     StoreCropSpec,
     VICRegCheckpointEncoder,
     sample_store_crops,
@@ -49,6 +65,7 @@ from ssl_us.eval.store_features import (
 
 DEFAULT_STORE = "/mnt/home/benbarkow/stores/wi8_fsa_k16.zarr"
 CKPT_ROOT = "/mnt/home/benbarkow/checkpoints"
+DEFAULT_LABEL_MAPS = LABEL_MAPS_DEFAULT_ROOT
 
 # (target, level, kind) — the §4.1 axes the store can support on its own.
 TARGETS = [
@@ -61,16 +78,83 @@ TARGETS = [
     ("x_centre", "crop", "ridge"),
 ]
 
-# §4.1 axes that need the per-pixel `seg` / `sos` maps. Those live in the source
-# NVIDIA frames, which are not on the cluster — `data/` is empty and only the
-# beamformed store survived. Reported, never silently dropped.
-UNAVAILABLE_TARGETS = {
-    "contains_cyst": "needs per-pixel segmentation map (source NVIDIA frames absent)",
+# §4.1's crop-level anatomy axes. These need the per-pixel `seg` / `sos` maps,
+# which are not in the store — they are fetched separately by
+# `scripts/wi13_fetch_label_maps.py` and read through `data/label_maps.py`.
+# Available only when that directory is present; otherwise reported in
+# `not_run`, never silently dropped.
+CROP_ANATOMY_TARGETS = [
+    ("contains_cyst", "crop", "logistic"),
+    ("cyst_fraction_crop", "crop", "ridge"),
+    ("sos_mean_crop", "crop", "ridge"),
+]
+
+UNAVAILABLE_REASON = {
+    "contains_cyst": "needs per-pixel segmentation map — run scripts/wi13_fetch_label_maps.py",
     "cyst_fraction_crop": "crop-level needs the segmentation map; frame-level cyst_fraction is run",
     "sos_mean_crop": "crop-level needs the per-pixel SoS map; frame-level sos_mean_frame is run",
 }
 
+# PLAN.md §2.6: 75 of 923 frames ship an entirely empty `segmentation_map`, and
+# NVIDIA's own issue list says cysts touching the frame edge are not labelled.
+# So an empty mask is an unknown mix of true negatives and unlabelled
+# positives; including those crops would inject that mix straight into the
+# primary tissue axis as zeros. Excluded from the cyst probes, and the
+# exclusion is reported rather than assumed.
+CYST_TARGETS = frozenset({"contains_cyst", "cyst_fraction_crop"})
+
 PHASE_ERROR_ORACLE_R2 = 0.585  # measured: R^2(phase_error ~ sos_mean + sos_std)
+
+
+def _extract_features(args, frame_ids, spec, label_maps, encoders):
+    """Features for every encoder, materializing crops a chunk of frames at a time.
+
+    Returns `(batch, {encoder: features})` where `batch` carries the labels,
+    frame ids and origins for the whole corpus but **no images** — those are
+    the 3.5 GB, and nothing downstream of feature extraction needs them.
+    """
+    chunk = args.frame_chunk or len(frame_ids)
+    parts, feats = [], {name: [] for name in encoders}
+    for start in range(0, len(frame_ids), chunk):
+        sub = frame_ids[start : start + chunk]
+        b = sample_store_crops(
+            args.store, frame_ids, spec, label_maps=label_maps, only_frames=list(sub)
+        )
+        for name, fn in encoders.items():
+            feats[name].append(fn(b.images))
+        b.images = np.empty((0,), dtype=np.float32)  # freed before the next chunk
+        parts.append(b)
+        if chunk < len(frame_ids):
+            print(
+                f"[wi13] features {min(start + chunk, len(frame_ids))}/{len(frame_ids)} frames",
+                flush=True,
+            )
+
+    batch = StoreCropBatch(
+        images=np.empty((0,), dtype=np.float32),
+        frame_id=np.concatenate([p.frame_id for p in parts]),
+        labels={
+            key: np.concatenate([p.labels[key] for p in parts]) for key in parts[0].labels
+        },
+        origins=np.concatenate([p.origins for p in parts]),
+    )
+    return batch, {name: np.concatenate(v) for name, v in feats.items()}
+
+
+def target_subsets(targets, labels: dict, n: int) -> dict:
+    """Per-target crop mask. Everything is in, except the cyst probes.
+
+    Applied at the probe call site rather than inside `probe`, so the protocol
+    is untouched and the exclusion stays visible next to the reason for it.
+    """
+    subsets = {t: np.ones(n, dtype=bool) for t, _, _ in targets}
+    empty = labels.get("segmentation_empty")
+    if empty is not None:
+        keep = ~np.asarray(empty, dtype=bool)
+        for t in subsets:
+            if t in CYST_TARGETS:
+                subsets[t] = keep
+    return subsets
 
 
 # Checkpoint directory layouts, tried in order. K=4 was trained by WI-12 and
@@ -144,12 +228,25 @@ def main() -> int:
     p.add_argument("--crops-per-frame", type=int, default=16, dest="crops_per_frame")
     p.add_argument("--split", default="validation", choices=["validation", "train"])
     p.add_argument("--limit-frames", type=int, default=0, help="smoke testing only")
+    p.add_argument(
+        "--frame-chunk",
+        type=int,
+        default=100,
+        dest="frame_chunk",
+        help="materialize crops this many frames at a time (0 = all at once)",
+    )
     p.add_argument("--stage", default="c0_const", choices=["c0_const", "gt_sos"])
     p.add_argument("--reference-encoder", default="vicreg_A", dest="reference_encoder")
     p.add_argument("--projections", nargs="+", default=["pca"])
     p.add_argument("--max-points", type=int, default=4000, dest="max_points")
     p.add_argument("--device", default="cuda")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--label-maps",
+        default=str(DEFAULT_LABEL_MAPS),
+        dest="label_maps",
+        help="per-pixel seg/sos maps; '' disables the crop-level anatomy targets",
+    )
     args = p.parse_args()
 
     # Geometry comes from LoaderConfig.for_arm — the same call the *training*
@@ -186,33 +283,65 @@ def main() -> int:
         flush=True,
     )
 
+    # The per-pixel maps are optional: without them the crop-level anatomy
+    # targets stay in `not_run` with their reason, exactly as before.
+    label_maps, maps_error = None, None
+    if args.label_maps:
+        try:
+            label_maps = open_label_maps(args.label_maps)
+            print(f"[wi13] label maps: {label_maps.root} ({len(label_maps)} frames)")
+        except (FileNotFoundError, ValueError) as exc:
+            maps_error = str(exc)
+            print(f"[wi13] no usable label maps ({exc}) — crop anatomy targets stay blocked")
+
     # Sampled once and shared by every encoder, so the contrast is a difference
     # in weights rather than in which crops each encoder happened to see.
-    batch = sample_store_crops(args.store, frame_ids, spec)
+    #
+    # Materialized in frame chunks, because the whole set is 3.5 GB at 830
+    # frames x 8 crops against a 4 GB cgroup on the `data` instance — the first
+    # attempt was OOM-killed. Origins are drawn for the full corpus up front
+    # (`sample_store_origins`), so the crops are identical to what a
+    # single-shot call would give; only the peak memory differs.
+    encoders = build_encoders(args, spec.in_channels)
+    batch, feats_cache = _extract_features(
+        args, frame_ids, spec, label_maps, encoders
+    )
     zc = batch.labels["z_centre"]
     print(
-        f"[wi13] crops {batch.images.shape} | depth {zc.min():.1f}-{zc.max():.1f} mm",
+        f"[wi13] crops {len(batch)} | depth {zc.min():.1f}-{zc.max():.1f} mm",
         flush=True,
     )
 
-    legal = filter_targets(args.stage, [t for t, _, _ in TARGETS])
-    blocked_by_stage = [t for t, _, _ in TARGETS if t not in legal]
+    targets = list(TARGETS)
+    if label_maps is not None:
+        targets += CROP_ANATOMY_TARGETS
+        pos = batch.labels["contains_cyst"]
+        keep = ~batch.labels["segmentation_empty"]
+        print(
+            f"[wi13] crop anatomy: cyst-positive {pos.mean() * 100:.1f}% of crops | "
+            f"cyst probes drop {int((~keep).sum())} crops from "
+            f"{len({f for f, e in zip(batch.frame_id, ~keep, strict=True) if e})} "
+            f"empty-segmentation frames (PLAN.md §2.6)",
+            flush=True,
+        )
+
+    legal = filter_targets(args.stage, [t for t, _, _ in targets])
+    blocked_by_stage = [t for t, _, _ in targets if t not in legal]
     if blocked_by_stage:
         print(f"[wi13] stage {args.stage!r} BLOCKS (label leak): {blocked_by_stage}")
 
-    encoders = build_encoders(args, spec.in_channels)
-    results, feats_cache = [], {}
+    results = []
+    subsets = target_subsets(targets, batch.labels, len(batch))
 
-    for name, fn in encoders.items():
-        f = fn(batch.images)
-        feats_cache[name] = f
+    for name, f in feats_cache.items():
         print(f"\n[{name}] features {f.shape}", flush=True)
-        for target, level, kind in TARGETS:
+        for target, level, kind in targets:
             if target not in legal:
                 continue
+            m = subsets[target]
             try:
                 r = probe(
-                    f, batch.labels[target], batch.frame_id, target,
+                    f[m], batch.labels[target][m], batch.frame_id[m], target,
                     stage=args.stage, level=level, kind=kind, seed=args.seed,
                 )
             except (ValueError, LabelLeakageError) as exc:
@@ -222,7 +351,8 @@ def main() -> int:
             # the bounds are carried separately — comparing the string would
             # compare characters and silently produce a nonsense verdict.
             row = {"encoder": name, **r.row(),
-                   "score_lo": r.score_lo, "score_hi": r.score_hi}
+                   "score_lo": r.score_lo, "score_hi": r.score_hi,
+                   "n_crops": int(m.sum())}
             if target == "phase_error":
                 row["oracle_r2"] = PHASE_ERROR_ORACLE_R2
                 row["beats_oracle"] = bool(r.score > PHASE_ERROR_ORACLE_R2)
@@ -235,7 +365,7 @@ def main() -> int:
     # ── Policy A vs Policy B, the WI-13 deliverable ──────────────────────────
     contrast = []
     by_key = {(r["encoder"], r["target"]): r for r in results}
-    for target, level, _kind in TARGETS:
+    for target, level, _kind in targets:
         a, b = by_key.get(("vicreg_A", target)), by_key.get(("vicreg_B", target))
         if not (a and b):
             continue
@@ -290,11 +420,22 @@ def main() -> int:
             f"{ref} — {method.upper()} (geometry regressed out)",
             out_dir / f"embed_{ref}_{method}_residual.png"))
 
-    not_run = dict(UNAVAILABLE_TARGETS)
-    for k in (16, 8, 1):
+    not_run = {}
+    if label_maps is None:
+        not_run.update(UNAVAILABLE_REASON)
+        if maps_error:
+            not_run["label_maps"] = maps_error
+    # Only report a K column as missing if it really has no trained pair — the
+    # ablation has since trained K=16 and K=1, and a hardcoded list would keep
+    # claiming otherwise in every artifact this writes.
+    for k in (16, 8, 4, 1):
+        if k == args.k:
+            continue
+        if all(find_checkpoint(args.checkpoint_root, k, p) for p in ("A", "B")):
+            continue
         not_run[f"K={k} column"] = (
             "K sets the stem's input channel count, so this cell needs its own "
-            "VICReg run (~1.5 h/arm); only K=4 was trained in WI-12"
+            "VICReg run (~1.5 h/arm); no trained pair found for this K"
         )
     for t in blocked_by_stage:
         not_run[t] = f"blocked by label-leakage guard on stage {args.stage!r}"
@@ -303,6 +444,17 @@ def main() -> int:
         "wi": 13, "k": spec.k, "crop_size": spec.crop_size, "stage": args.stage,
         "split": args.split, "n_frames": len(frame_ids), "n_crops": len(batch),
         "crops_per_frame": spec.crops_per_frame,
+        "label_maps": str(label_maps.root) if label_maps is not None else None,
+        "cyst_probe_exclusion": (
+            None if label_maps is None
+            else {
+                "reason": "PLAN.md §2.6 — empty segmentation_map is an unknown mix "
+                          "of true negatives and unlabelled edge-touching cysts",
+                "targets": sorted(CYST_TARGETS),
+                "crops_dropped": int((~subsets["contains_cyst"]).sum()),
+                "crops_kept": int(subsets["contains_cyst"].sum()),
+            }
+        ),
         "encoders": list(encoders), "reference_encoder": ref,
         "geometry_variance_explained": geometry_r2,
         "clusters": clusters, "results": results,

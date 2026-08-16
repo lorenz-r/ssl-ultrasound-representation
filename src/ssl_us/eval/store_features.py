@@ -77,7 +77,11 @@ class StoreCropBatch:
     origins: np.ndarray | None = None
 
     def __len__(self) -> int:
-        return len(self.images)
+        # Counted from `frame_id`, not `images`: once features are extracted
+        # the caller may drop the images (they are 3.5 GB at corpus scale) and
+        # keep the batch for its labels, and a length of 0 there would silently
+        # empty every per-target mask built from it.
+        return len(self.frame_id)
 
 
 # Frame-level targets recoverable from `frame_metadata.json`. Crop-level
@@ -115,31 +119,86 @@ def _origin_bounds(spec: StoreCropSpec, nz: int, nx: int) -> tuple[int, int, int
     return z_lo, z_hi, 0, x_hi
 
 
+def sample_store_origins(
+    frame_ids: list[str], spec: StoreCropSpec, nz: int, nx: int
+) -> tuple[list[str], np.ndarray]:
+    """The `(frame_id, (row, col))` of every crop, before any pixel is read.
+
+    Split out from the materialization so a corpus can be processed in chunks
+    without changing which crops get drawn: the generator is consumed here, in
+    one pass over the full frame list, so chunk boundaries cannot shift the
+    stream. Sampling per chunk instead would re-seed for every chunk and give a
+    different — and silently different — set of crops.
+    """
+    z_lo, z_hi, x_lo, x_hi = _origin_bounds(spec, nz, nx)
+    rng = np.random.default_rng(spec.seed)
+    ids: list[str] = []
+    origins: list[tuple[int, int]] = []
+    for fid in frame_ids:
+        z0s = rng.integers(z_lo, z_hi + 1, size=spec.crops_per_frame)
+        x0s = rng.integers(x_lo, x_hi + 1, size=spec.crops_per_frame)
+        for z0, x0 in zip(z0s, x0s, strict=True):
+            ids.append(fid)
+            origins.append((int(z0), int(x0)))
+    return ids, np.asarray(origins, dtype=int).reshape(-1, 2)
+
+
 def sample_store_crops(
     store_path: str | Path,
     frame_ids: list[str],
     spec: StoreCropSpec,
+    label_maps=None,
+    only_frames: list[str] | None = None,
 ) -> StoreCropBatch:
     """Draw `crops_per_frame` un-augmented crops from each frame in `frame_ids`.
 
     Returns crops already in the encoder's layout, ``(N, 2K, size, size)``, with
     geometric labels (`z_centre`, `x_centre`, in mm) attached per crop and
     frame-level labels broadcast across their frame's crops.
+
+    Pass `label_maps` (a `data.label_maps.LabelMaps`) to also attach the
+    crop-level anatomy targets. They are suffixed `_crop` rather than given
+    §4.1's bare names because `cyst_fraction` is already taken here by the
+    *frame-level* quantity from `frame_metadata.json`, and every K column
+    measured so far reports it under that name — silently changing what the
+    name means would make old and new columns look comparable when they are
+    not.
+
+    `only_frames` materializes just those frames while still drawing origins
+    for all of `frame_ids`, so a caller short of memory can walk the corpus in
+    chunks and get exactly the crops the whole-corpus call would have given.
+    The full set is 3.5 GB at 830 frames x 8 crops, against a 4 GB cgroup on
+    the `data` instance — which is how this argument came to exist.
     """
     store = open_store(store_path)
     metadata = store.read_frame_metadata()
     occupancy = np.asarray(store.occupancy)  # (Z, X, K_store)
     nz, nx = store.spec.nz, store.spec.nx
-    z_lo, z_hi, x_lo, x_hi = _origin_bounds(spec, nz, nx)
 
-    rng = np.random.default_rng(spec.seed)
-    crops, ids, z_centres, x_centres, origins = [], [], [], [], []
+    all_ids, all_origins = sample_store_origins(frame_ids, spec, nz, nx)
+    wanted = set(frame_ids if only_frames is None else only_frames)
+    keep = np.array([fid in wanted for fid in all_ids], dtype=bool)
+    by_frame: dict[str, list[tuple[int, int]]] = {}
+    for fid, (z0, x0) in zip(all_ids, all_origins, strict=True):
+        if fid in wanted:
+            by_frame.setdefault(fid, []).append((int(z0), int(x0)))
 
-    for fid in frame_ids:
+    ids = [fid for fid, k in zip(all_ids, keep, strict=True) if k]
+    origins_arr = all_origins[keep]
+    n = len(ids)
+    crops = np.empty((n, spec.in_channels, spec.crop_size, spec.crop_size), dtype=np.float32)
+    z_centres = np.empty(n, dtype=np.float32)
+    x_centres = np.empty(n, dtype=np.float32)
+
+    # Frame-major so each frame is decompressed once, but written back into
+    # the crop-major order the origins were drawn in.
+    positions: dict[str, list[int]] = {}
+    for i, fid in enumerate(ids):
+        positions.setdefault(fid, []).append(i)
+
+    for fid, frame_origins in by_frame.items():
         frame = store.read_frame(store.index_of(fid))  # (2, Z, X, K_store)
-        z0s = rng.integers(z_lo, z_hi + 1, size=spec.crops_per_frame)
-        x0s = rng.integers(x_lo, x_hi + 1, size=spec.crops_per_frame)
-        for z0, x0 in zip(z0s, x0s, strict=True):
+        for (z0, x0), out_i in zip(frame_origins, positions[fid], strict=True):
             zs, xs = slice(z0, z0 + spec.crop_size), slice(x0, x0 + spec.crop_size)
             # Reduce the K-ladder and normalize by occupancy in one step, in
             # that order. The reverse — normalizing at K=16 then reducing —
@@ -149,27 +208,36 @@ def sample_store_crops(
             )  # (2, size, size, k)
             # (2, size, size, k) -> (2k, size, size), I-block then Q-block,
             # matching GpuAugmentor's `movedim(-1, 2).flatten(1, 2)`.
-            crops.append(np.moveaxis(v, -1, 1).reshape(spec.in_channels, *v.shape[1:3]))
-            ids.append(fid)
-            z_centres.append(geo.row_to_z_mm(z0 + spec.crop_size / 2))
-            x_centres.append(geo.col_to_x_mm(x0 + spec.crop_size / 2))
-            origins.append((z0, x0))
+            crops[out_i] = np.moveaxis(v, -1, 1).reshape(spec.in_channels, *v.shape[1:3])
+            z_centres[out_i] = geo.row_to_z_mm(z0 + spec.crop_size / 2)
+            x_centres[out_i] = geo.col_to_x_mm(x0 + spec.crop_size / 2)
 
-    labels: dict[str, np.ndarray] = {
-        "z_centre": np.asarray(z_centres, dtype=np.float32),
-        "x_centre": np.asarray(x_centres, dtype=np.float32),
-    }
+    labels: dict[str, np.ndarray] = {"z_centre": z_centres, "x_centre": x_centres}
     per_frame = frame_labels_from_metadata(metadata, frame_ids)
     frame_index = {fid: i for i, fid in enumerate(frame_ids)}
     row = np.array([frame_index[f] for f in ids])
     for key, values in per_frame.items():
         labels[key] = values[row]
 
+    if label_maps is not None:
+        anatomy = label_maps.crop_labels(ids, origins_arr, spec.crop_size)
+        labels["cyst_fraction_crop"] = anatomy["cyst_fraction"]
+        labels["contains_cyst"] = anatomy["contains_cyst"]
+        labels["sos_mean_crop"] = anatomy["sos_mean"]
+        labels["sos_std_crop"] = anatomy["sos_std"]
+        # Carried so the caller can honour PLAN.md §2.6: the 75 frames whose
+        # `segmentation_map` is entirely empty are a mix of true negatives and
+        # unlabelled edge-touching cysts, and belong out of the cyst probes
+        # rather than in them as zeros.
+        labels["segmentation_empty"] = np.array(
+            [bool(metadata[f]["segmentation_empty"]) for f in ids], dtype=bool
+        )
+
     return StoreCropBatch(
-        images=np.stack(crops).astype(np.float32),
+        images=crops,
         frame_id=np.asarray(ids, dtype=object),
         labels=labels,
-        origins=np.asarray(origins, dtype=int),
+        origins=origins_arr,
     )
 
 

@@ -9,6 +9,8 @@ training path in `data/transforms.py` rather than against a hardcoded expectatio
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -154,3 +156,147 @@ def test_z_min_mm_and_impossible_crops_are_enforced():
     # A crop larger than the frame is a config error, not a silent empty batch.
     with pytest.raises(ValueError, match="does not fit"):
         _origin_bounds(StoreCropSpec(crop_size=128), nz=12, nx=10)
+
+
+# ── crop-level anatomy labels (WI-13's previously blocked cells) ─────────────
+
+
+def _label_maps(frame_ids, cyst_frames=(1,)):
+    """A `LabelMaps` over the real (507, 456) grid, cysts in chosen frames."""
+    from ssl_us.data.label_maps import LabelMaps
+
+    n = len(frame_ids)
+    seg = np.zeros((n, geo.BMODE_NZ, geo.BMODE_NX), dtype=np.uint8)
+    for i in cyst_frames:
+        seg[i] = 1  # entire frame is cyst -> every crop's fraction is exactly 1
+    sos = np.full((n, geo.SOS_NZ, geo.SOS_NX), 1500.0, dtype=np.float32)
+    for i in range(n):
+        sos[i] += i
+    return LabelMaps(
+        root=Path("in-memory"),
+        frame_ids=list(frame_ids),
+        arrays={"seg": seg, "sos": sos},
+        scalars={},
+    )
+
+
+def test_label_maps_attach_the_crop_level_anatomy_targets(store_path):
+    path, frame_ids = store_path
+    spec = StoreCropSpec(k=4, crop_size=CROP, crops_per_frame=2, seed=0)
+    batch = sample_store_crops(path, frame_ids, spec, label_maps=_label_maps(frame_ids))
+
+    assert {
+        "cyst_fraction_crop",
+        "contains_cyst",
+        "sos_mean_crop",
+        "sos_std_crop",
+        "segmentation_empty",
+    } <= set(batch.labels)
+    # frame 1 is entirely cyst, the others entirely tissue
+    is_frame_1 = batch.frame_id == frame_ids[1]
+    assert (batch.labels["cyst_fraction_crop"][is_frame_1] == 1.0).all()
+    assert (batch.labels["contains_cyst"][is_frame_1] == 1).all()
+    assert (batch.labels["cyst_fraction_crop"][~is_frame_1] == 0.0).all()
+    assert (batch.labels["contains_cyst"][~is_frame_1] == 0).all()
+    # sos is constant per frame here, so the crop mean is the frame's value
+    for i, fid in enumerate(frame_ids):
+        sel = batch.frame_id == fid
+        np.testing.assert_allclose(batch.labels["sos_mean_crop"][sel], 1500.0 + i, rtol=1e-5)
+
+
+def test_crop_anatomy_labels_use_the_origins_the_batch_records(store_path):
+    """The mm centres are a lossy view of the origin; labels must key on the
+    recorded `(row, col)` or a half-pixel slip shifts every mask."""
+    from ssl_us.data.label_maps import LabelMaps
+
+    path, frame_ids = store_path
+    spec = StoreCropSpec(k=4, crop_size=CROP, crops_per_frame=3, seed=1)
+    n = len(frame_ids)
+    seg = np.zeros((n, geo.BMODE_NZ, geo.BMODE_NX), dtype=np.uint8)
+    seg[:, ::2, :] = 1  # every other row -> crop fraction depends on the origin's parity
+    maps = LabelMaps(
+        root=Path("in-memory"),
+        frame_ids=list(frame_ids),
+        arrays={
+            "seg": seg,
+            "sos": np.zeros((n, geo.SOS_NZ, geo.SOS_NX), dtype=np.float32),
+        },
+        scalars={},
+    )
+    batch = sample_store_crops(path, frame_ids, spec, label_maps=maps)
+    for i, (top, left) in enumerate(batch.origins):
+        expected = seg[
+            frame_ids.index(batch.frame_id[i]), top : top + CROP, left : left + CROP
+        ].mean()
+        assert batch.labels["cyst_fraction_crop"][i] == pytest.approx(expected)
+
+
+def test_without_label_maps_nothing_extra_is_attached(store_path):
+    """The maps stay optional — the store-only path must be unchanged."""
+    path, frame_ids = store_path
+    spec = StoreCropSpec(k=4, crop_size=CROP, crops_per_frame=2, seed=0)
+    labels = sample_store_crops(path, frame_ids, spec).labels
+    assert "cyst_fraction_crop" not in labels
+    assert "contains_cyst" not in labels
+    assert "segmentation_empty" not in labels
+    # and the frame-level cyst_fraction keeps its meaning
+    assert "cyst_fraction" in labels
+
+
+# ── chunked materialization (the 4 GB cgroup on the `data` instance) ─────────
+
+
+def test_only_frames_gives_exactly_the_whole_corpus_crops(store_path):
+    """Walking the corpus in chunks must not change which crops are drawn.
+
+    Re-seeding per chunk would — and silently: every crop would still be legal,
+    just different, so a chunked run and a whole-corpus run would disagree with
+    no error anywhere.
+    """
+    path, frame_ids = store_path
+    spec = StoreCropSpec(k=4, crop_size=CROP, crops_per_frame=3, seed=7)
+    whole = sample_store_crops(path, frame_ids, spec)
+
+    chunks = [
+        sample_store_crops(path, frame_ids, spec, only_frames=[fid]) for fid in frame_ids
+    ]
+    images = np.concatenate([c.images for c in chunks])
+    ids = np.concatenate([c.frame_id for c in chunks])
+    origins = np.concatenate([c.origins for c in chunks])
+
+    np.testing.assert_array_equal(ids, whole.frame_id)
+    np.testing.assert_array_equal(origins, whole.origins)
+    np.testing.assert_array_equal(images, whole.images)
+    for key in whole.labels:
+        np.testing.assert_array_equal(
+            np.concatenate([c.labels[key] for c in chunks]), whole.labels[key], err_msg=key
+        )
+
+
+def test_origins_are_drawn_before_any_pixel_is_read(store_path):
+    """`sample_store_origins` is the contract chunking relies on: same spec,
+    same frame list -> same origins, independent of what gets materialized."""
+    from ssl_us.eval.store_features import sample_store_origins
+
+    path, frame_ids = store_path
+    spec = StoreCropSpec(k=4, crop_size=CROP, crops_per_frame=3, seed=7)
+    ids_a, origins_a = sample_store_origins(frame_ids, spec, 12, 10)
+    ids_b, origins_b = sample_store_origins(frame_ids, spec, 12, 10)
+    assert ids_a == ids_b
+    np.testing.assert_array_equal(origins_a, origins_b)
+    np.testing.assert_array_equal(
+        origins_a, sample_store_crops(path, frame_ids, spec).origins
+    )
+    assert len(ids_a) == len(frame_ids) * spec.crops_per_frame
+
+
+def test_batch_length_survives_dropping_the_images(store_path):
+    """`wi13_matrix` frees the image array after feature extraction and keeps
+    the batch for its labels. If `__len__` read `images`, every per-target mask
+    built from it would come out empty and every probe would be skipped."""
+    path, frame_ids = store_path
+    spec = StoreCropSpec(k=4, crop_size=CROP, crops_per_frame=2, seed=0)
+    batch = sample_store_crops(path, frame_ids, spec)
+    n = len(batch)
+    batch.images = np.empty((0,), dtype=np.float32)
+    assert len(batch) == n == len(frame_ids) * 2
