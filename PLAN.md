@@ -774,7 +774,8 @@ rev-2's grid-matching alone.
 > but the headline transfer arm should be FSA-on-FSA.
 >
 > Two other numbers above need revising with it: Stanford's depth range is
-> **0.39–21.2 mm** (the publishers truncated every file at ~846 fast-time
+> **−0.97 to 20.18 mm** on the store's own axis, with real signal to ~19.9 mm
+> (the publishers truncated every file at ~846 fast-time
 > samples; the "0–21.6 mm" figure came from the same truncation read through
 > the old pipeline), and the corpus is now **117 acquisitions over 30 inferred
 > sessions**, not 168 frames. See `scripts/wi16_fetch_stanford_fsa.py`.
@@ -1772,7 +1773,7 @@ left is the beamforming pass, which needs a GPU instance.
 
 *Done when:* both grid variants are built; Stanford's own reference B-mode passes the
 same K=1 validation gate as WI-4; the headline transfer table uses the **full
-0.4–21.2 mm range at K ≤ 4** with the 8–21.2 mm restricted row reported alongside at
+0–19.9 mm range at K ≤ 4** with the 8–19.9 mm restricted row reported alongside at
 every K (the §4.5c falsification instrument); the 64-px secondary crop row is
 reported for K ≥ 8; and the Stanford probe axes (session, file, depth, echogenicity)
 are reported against the same baselines including random-init.

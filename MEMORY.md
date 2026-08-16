@@ -354,12 +354,24 @@ adjoint/Tikhonov/rSVD/tSVD choice, no residual to attribute transfer loss to.
 ### 10.1 What is on disk
 
 `/mnt/home/benbarkow/stores/wi16_stanford_fsa.zarr` — 117 frames of
-`(192, 192, 287)` complex64 baseband IQ, ~9 GB, one FSA acquisition per frame,
-plus `coverage`, `frame_metadata.json` and `manifest.json`. Read it with
+`(192, 192, 287)` complex64 baseband IQ, **8.8 GB**, one FSA acquisition per
+frame, plus `coverage`, `frame_metadata.json` and `manifest.json`. Read it with
 `ssl_us.data.stanford_fsa.open_fsa_store`. Built by
-`scripts/wi16_fetch_stanford_fsa.py` in ~70 min on the `data` instance
-(66–68 MB/s download, ~29 s decode per frame, raw `.mat` deleted as consumed so
+`scripts/wi16_fetch_stanford_fsa.py` in **62.9 min** on the `data` instance
+(66–77 MB/s download, ~29 s decode per frame, raw `.mat` deleted as consumed so
 peak scratch is one file rather than 76 GB).
+
+Verified over all 117 after the build: no all-zero or non-finite frame,
+per-frame max |IQ| 11 211–23 411, **84 `FSA` + 33 `FSA_Fast`** across 10 dates
+/ 30 inferred sessions / 117 distinct source files, and the raw signal cutoff
+is inside the 861-sample window on **every** file with room to spare. HVMux
+coverage takes values 1, 2 and 3 — the `FSA_Fast` sequence uses three receive
+apertures where plain `FSA` uses two, so per-element averaging differs and the
+`coverage` array is worth carrying. Frames from both types beamform to
+recognisable rat abdominal wall and liver.
+
+⚠ **Depth: the store's axis runs −0.97 → 20.18 mm**, and the negative start is
+correct, not a bug — see §10.2 on `t0`. Real signal ends at ~19.9 mm.
 
 **76 GB → 9 GB, by three reductions, measured not assumed:**
 
@@ -370,7 +382,7 @@ peak scratch is one file rather than 76 GB).
 | decimate ×3 after IQ demodulation | envelope NCC **0.99669** as stored; **0.99991** re-sampled back to 31.25 MHz |
 
 The truncation is free because **the publishers already truncated the data** —
-every file is identically zero past sample ~846 (21.2 mm), which is what the
+every file is identically zero past raw sample ~846 (19.9 mm), which is what the
 "_truncated" in their directory names means. Storing 2560 samples would be
 storing 1700 zeros. The 0.99991-vs-0.99669 gap says the decimation itself loses
 almost nothing and the visible residual is *linear interpolation at the lower
@@ -391,7 +403,7 @@ For scale: NVIDIA's own two reconstructions of one frame score pixel-wise NCC
 | elements / pitch | 180 / 201.0 µm | 192 / 200.0 µm |
 | carrier, λ | 6.5 MHz, 236.9 µm | 7.813 MHz, 197.1 µm |
 | fast-time rate | 13.33 MHz | 10.42 MHz (31.25 ÷ 3) |
-| depth | 0–40 mm | 0.39–21.2 mm |
+| depth | 0–40 mm | −0.97 to 20.18 mm axis, signal to ~19.9 mm |
 | `t0` | 3 discrete levels | one value, **negative** |
 
 ⚠ **The `t0` row is the trap.** Stanford's time origin carries
