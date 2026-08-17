@@ -157,17 +157,29 @@ def target_subsets(targets, labels: dict, n: int) -> dict:
     return subsets
 
 
-# Checkpoint directory layouts, tried in order. K=4 was trained by WI-12 and
-# lives under the wi12_* name; the K-ablation cells wi13_kablation.sh trains
-# carry K in their name. Ordered so an explicit per-K directory always wins.
+# Checkpoint directory layouts, tried in order. The K-ablation cells
+# `wi13_kablation.sh` trains carry K in their directory name; K=4 was trained
+# earlier by WI-12 and lives under the wi12_* name, which predates the
+# convention. Ordered so an explicit per-K directory always wins.
 CKPT_TEMPLATES = (
     "wi13_vicreg_k{k}_policy{policy}",
     "wi12_vicreg_policy{policy}",
 )
 
+# ⚠ The wi12_* fallback carries no `{k}`, so it matches *every* K, and WI-12
+# only ever trained K=4. Left ungated it reports a trained pair for K=8 — which
+# does not exist — and the availability probe below then drops "K=8 column"
+# from `not_run`, i.e. exactly the silent truncation WI-13's done-condition
+# forbids. It is a wrong *answer*, not a crash: loading it for a real `--k 8`
+# run would fail loudly on the stem's channel count in `load_state_dict`, so
+# the only thing it ever corrupted is the not-run bookkeeping.
+LEGACY_TEMPLATE_K = 4
+
 
 def find_checkpoint(root: str | Path, k: int, policy: str) -> Path | None:
     for template in CKPT_TEMPLATES:
+        if "{k}" not in template and k != LEGACY_TEMPLATE_K:
+            continue
         candidate = Path(root) / template.format(k=k, policy=policy) / "last.pt"
         if candidate.exists():
             return candidate
@@ -303,6 +315,22 @@ def main() -> int:
     # (`sample_store_origins`), so the crops are identical to what a
     # single-shot call would give; only the peak memory differs.
     encoders = build_encoders(args, spec.in_channels)
+    # `pca_raw` is the one encoder that is *fitted* rather than applied: it runs
+    # a fresh PCA on whatever array it is handed, so under chunking it fits one
+    # basis per chunk instead of one over the corpus, and its scores shift by up
+    # to 0.026 (measured, K=4 train). Every other encoder is a per-crop forward
+    # pass and is chunk-independent. Validation is 93 frames, i.e. one chunk, so
+    # this only ever bites the 830-frame train split — which is exactly how it
+    # went unnoticed. Chunking exists for the `data` instance's 4 GB cgroup;
+    # anywhere with room for 3.5 GB should pass `--frame-chunk 0`.
+    chunked = bool(args.frame_chunk) and args.frame_chunk < len(frame_ids)
+    if chunked and "pca_raw" in encoders:
+        print(
+            f"[wi13] ⚠ pca_raw is fitted per chunk ({args.frame_chunk} frames of "
+            f"{len(frame_ids)}), not over the corpus — its scores are not "
+            f"comparable to a --frame-chunk 0 column. Recorded in results.json.",
+            flush=True,
+        )
     batch, feats_cache = _extract_features(
         args, frame_ids, spec, label_maps, encoders
     )
@@ -444,6 +472,8 @@ def main() -> int:
         "wi": 13, "k": spec.k, "crop_size": spec.crop_size, "stage": args.stage,
         "split": args.split, "n_frames": len(frame_ids), "n_crops": len(batch),
         "crops_per_frame": spec.crops_per_frame,
+        "frame_chunk": args.frame_chunk,
+        "pca_raw_fitted_per_chunk": bool(chunked and "pca_raw" in encoders),
         "label_maps": str(label_maps.root) if label_maps is not None else None,
         "cyst_probe_exclusion": (
             None if label_maps is None

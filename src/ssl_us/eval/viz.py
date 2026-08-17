@@ -204,3 +204,74 @@ def plot_embedding(
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close(fig)
     return out_path
+
+
+def plot_encoder_grid(
+    xys: dict[str, np.ndarray],
+    labels: dict[str, np.ndarray],
+    colour_keys: list[str],
+    title: str,
+    out_path: str | Path,
+    point_size: int = 6,
+    cell_notes: dict[str, dict[str, str]] | None = None,
+) -> Path:
+    """One row per colour key, one column per encoder — the A-vs-B figure.
+
+    `plot_embedding` shows every label for *one* encoder, which answers "what
+    did this model organise by". The comparison question is the transpose: hold
+    the label fixed and vary the encoder. Policy B's `x_centre` R² is −0.001
+    against Policy A's +0.52, and that contrast is only visible side by side.
+
+    The comparison is fair because **every encoder saw the identical crops** —
+    `wi13_matrix` samples origins once for the whole corpus and shares them, so
+    the only difference between two columns is the weights. Each row also gets a
+    single shared colour scale and one colorbar, so a panel cannot look
+    structured merely by having been given a tighter range than its neighbour.
+
+    ⚠ The 2-D projections are *per encoder* and their axes are not comparable
+    between columns — t-SNE and UMAP distances are not metric at all. Read a row
+    for whether structure exists, never for how far apart two points are. The
+    probe R² carried in `cell_notes` is the quantity that is comparable, which
+    is why it is printed on the panel rather than left in a separate table.
+    """
+    encoders = list(xys)
+    fig, axes = plt.subplots(
+        len(colour_keys), len(encoders),
+        figsize=(4.4 * len(encoders), 4.2 * len(colour_keys)),
+        squeeze=False,
+    )
+    for row, key in enumerate(colour_keys):
+        values = np.asarray(labels[key])
+        categorical = values.dtype == object or values.dtype.kind in "USib"
+        # Shared scale across the row: computed once from the values, which are
+        # the same array for every column, and applied explicitly so a future
+        # per-encoder subsample cannot silently rescale one panel.
+        vmin, vmax = (None, None) if categorical else (float(values.min()), float(values.max()))
+        handle = None
+        for col, name in enumerate(encoders):
+            ax = axes[row][col]
+            xy = xys[name]
+            if categorical:
+                cats = sorted(set(values.tolist()))
+                cmap = plt.get_cmap("tab10" if len(cats) <= 10 else "tab20")
+                for k, c in enumerate(cats):
+                    m = values == c
+                    ax.scatter(xy[m, 0], xy[m, 1], s=point_size, alpha=0.6,
+                               color=cmap(k % cmap.N), label=str(c), linewidths=0)
+                if col == len(encoders) - 1:
+                    ax.legend(markerscale=3, fontsize=7, loc="best", framealpha=0.7)
+            else:
+                handle = ax.scatter(xy[:, 0], xy[:, 1], s=point_size, alpha=0.6,
+                                    c=values, cmap="viridis", linewidths=0,
+                                    vmin=vmin, vmax=vmax)
+            note = (cell_notes or {}).get(name, {}).get(key)
+            ax.set_title(f"{name}\n{key}" + (f"  ({note})" if note else ""), fontsize=10)
+            ax.set_xticks([])
+            ax.set_yticks([])
+        if handle is not None:
+            fig.colorbar(handle, ax=list(axes[row]), fraction=0.02, pad=0.01)
+    fig.suptitle(title, fontsize=13)
+    out_path = Path(out_path)
+    fig.savefig(out_path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return out_path

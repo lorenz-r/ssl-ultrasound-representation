@@ -102,3 +102,36 @@ def test_contains_cyst_is_probed_as_a_classifier(mod):
     assert kinds["contains_cyst"] == "logistic"
     assert kinds["cyst_fraction_crop"] == "ridge"
     assert kinds["sos_mean_crop"] == "ridge"
+
+
+def test_legacy_checkpoint_template_does_not_answer_for_other_k(mod, tmp_path):
+    """The wi12_* fallback carries no `{k}`, so it matches every K — and WI-12
+    only trained K=4.
+
+    Ungated it reports a trained pair for K=8, which does not exist, and the
+    availability probe then drops "K=8 column" from `not_run` — the silent
+    truncation the done-condition forbids. K=4 must still resolve through it,
+    because that is the directory WI-12 actually wrote.
+    """
+    for policy in ("A", "B"):
+        legacy = tmp_path / f"wi12_vicreg_policy{policy}"
+        legacy.mkdir()
+        (legacy / "last.pt").touch()
+
+    assert mod.find_checkpoint(tmp_path, 4, "A") is not None, "K=4 is WI-12's own run"
+    for k in (16, 8, 1):
+        assert mod.find_checkpoint(tmp_path, k, "A") is None, (
+            f"K={k} resolved to WI-12's K=4 checkpoint via the k-less fallback"
+        )
+
+
+def test_per_k_checkpoint_directory_wins_over_the_legacy_name(mod, tmp_path):
+    """An explicit wi13_vicreg_k{k}_* directory is the authoritative one."""
+    for policy in ("A", "B"):
+        for name in (f"wi12_vicreg_policy{policy}", f"wi13_vicreg_k16_policy{policy}"):
+            d = tmp_path / name
+            d.mkdir()
+            (d / "last.pt").touch()
+
+    found = mod.find_checkpoint(tmp_path, 16, "A")
+    assert found is not None and found.parent.name == "wi13_vicreg_k16_policyA"

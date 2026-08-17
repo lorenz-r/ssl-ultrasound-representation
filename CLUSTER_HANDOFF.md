@@ -151,7 +151,7 @@ Every *test* above runs without a GPU or the full corpus — they use synthetic
 data, a small real download (a couple of NVIDIA frames), or the real local
 Stanford `.mat` files in `data/rats/`. ⚠ **`data/rats/` is not present on the
 cluster** (it was local to the phase-1 laptop), so `pytest -q` here reports
-**325 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
+**331 passed, 6 skipped** — those 6 are `test_stanford_mat.py` and they skip
 cleanly. Re-download the Stanford `.mat` files before WI-16 work. The two exceptions are the artefacts
 rather than the tests: WI-4's gate numbers and WI-8's 923-frame store were
 both produced on a `24g` GPU instance against the full corpus.
@@ -513,7 +513,7 @@ Needs WI-8's output. Not started — no code written for the dataset card or
 the smoke-subset extraction. PLAN.md §5.2 WI-9 lists exactly what the card
 must contain (attribution, license, changes-made statement, etc.).
 
-### WI-13 — DONE for the reduced ladder: K ∈ {1, 4, 16} × {A, B}, all probed
+### WI-13 — DONE for the reduced ladder: K ∈ {1, 4, 16} × {A, B}, all ten targets
 
 Six trained arms, all six probed on both splits. Per-column results are
 committed at `tests/data/wi13_k{1,4,16}_{train,validation}_results.json`
@@ -632,11 +632,72 @@ lands in a narrow final RankMe band (289–310) regardless of start: K=16 comes
 by itself a collapse signature; check where it started.
 
 **Not run, with reasons** (also machine-readable under `not_run` in the JSON):
-`K = 8` is dropped per PLAN.md §5.5's cut-list item 4. The crop-level
-anatomy targets (`contains_cyst`, crop-level `cyst_fraction`, crop-level
-`sos_mean`) need the per-pixel `seg`/`sos` maps, which live in the source
-NVIDIA frames; `data/` is empty on this cluster and only the beamformed store
-survived, so they cannot be run without re-downloading.
+`K = 8` is dropped per PLAN.md §5.3's cut-list item 4, and it is now the
+**only** entry — every WI-13 column carries all ten targets.
+
+#### The three crop-level anatomy targets are DONE (2026-08-17)
+
+`contains_cyst`, `cyst_fraction_crop` and `sos_mean_crop` sat in `not_run`
+because they need the per-pixel `seg`/`sos` maps and `data/` is empty on this
+cluster. That was solved without a re-download — the maps were fetched by
+column-pruned parquet reads (1.9 GB, not 271 GB; MEMORY.md §9) — and all six
+columns have been re-run with them by `scripts/wi13_anatomy_columns.sh`.
+
+Policy A wins all three at **every K and on both splits**, with CI separation
+in 17 of 18 cells. K=4 train, against the controls:
+
+| target | A | B | random | trivial |
+|---|---|---|---|---|
+| contains_cyst (BA) | **0.951** | 0.909 | 0.792 | 0.784 |
+| cyst_fraction_crop | **0.792** | 0.786 | 0.464 | 0.362 |
+| sos_mean_crop | **0.720** | 0.615 | 0.482 | 0.300 |
+
+This is the project's strongest evidence that the representation carries
+*tissue* rather than acquisition geometry — but it is **not yet controlled for
+crop position**, and cysts have a spatial distribution. See MEMORY.md §12 for
+the geometry-variance number that bears on it and what it does not settle.
+
+**Before promoting a re-run into `tests/data/`, run the gate:**
+
+```bash
+python scripts/wi13_anatomy_verify.py          # exact; --rtol 1e-5 for the MAE CI bounds
+```
+
+All 238 pre-existing cells reproduced `score` and `n_eff` bitwise. The two MAE
+encoders' bootstrap bounds moved by ≤ 3.6e-6 on the K=4 columns and the cause
+is not established — MEMORY.md §11.1 records what was ruled out. ⚠ The gate is
+vacuous *after* promotion (it then compares a file to its own copy).
+
+⚠ **`find_checkpoint`'s `wi12_vicreg_policy{policy}` fallback has no `{k}` in
+it**, so before the 2026-08-17 fix it matched every K and answered "yes, K=8 is
+trained" with WI-12's K=4 checkpoint — which quietly deleted the `K=8 column`
+entry from every artifact's `not_run`, i.e. the exact silent truncation the
+done-condition forbids. It was never a wrong *number* (a real `--k 8` run dies
+on the stem's channel count in `load_state_dict`), only wrong bookkeeping.
+Two tests in `tests/test_wi13_matrix.py` now pin it.
+
+### WI-13 qualitative — DONE for K=4 (2026-08-17), and it is a null result
+
+```bash
+bash scripts/wi13_qualitative_columns.sh          # K=4 both splits
+bash scripts/wi13_qualitative_columns.sh 16:train # any K:split pair
+```
+
+Produces the encoder grids (PCA/t-SNE/UMAP, plain + geometry-residualised),
+k-means at k ∈ {2,4,8,16} and DBSCAN. **Run it after the probe columns, not
+beside them** — t-SNE is CPU-bound and sharing 4 cores with the probe chain's
+loaders starves both, with a 0 % GPU reading that looks exactly like a hang.
+
+**The clustering finding is negative and should be reported as one:** the
+VICReg arms have silhouette 0.02–0.05 and best ARI-vs-cyst 0.147, while
+`pca_raw` (0.66) and `trivial` (0.48) score *high* by clustering on brightness.
+DBSCAN gives 7 clusters at 91–97 % noise. The representation is a continuous
+manifold that linear probes read and k-means cannot. Full tables in
+MEMORY.md §12 and `tests/data/wi13_k4_*_clusters.md`.
+
+The one useful positive number: linear (z,x) explains **7.1 %** of Policy A's
+feature variance against **37.0 %** for the untrained ResNet-18 — a random CNN
+is largely a position encoder and training cuts that five-fold.
 
 ### WI-16 — Stanford, past the reader
 
@@ -737,7 +798,7 @@ image.
 
 ## Quick sanity checklist before starting new work
 
-- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 271 passed, 6 skipped
+- [ ] On a `data` instance: `pip install -e ".[dev]" && pytest -q` → 331 passed, 6 skipped
       (the 6 skips are `test_stanford_mat.py`, which needs `data/rats/*.mat`)
 - [ ] `ruff check .` → clean
 - [x] On a `12g`/`24g` instance: `nvidia-smi` works — confirmed, TITAN RTX

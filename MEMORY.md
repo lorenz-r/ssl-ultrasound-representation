@@ -1,4 +1,4 @@
-# MEMORY — everything known as of 2026-08-16
+# MEMORY — everything known as of 2026-08-17
 
 One file, written to be read cold. It records **what was run, what was
 measured, what it means, and what I got wrong**. PLAN.md remains the design
@@ -6,9 +6,10 @@ doc and CLUSTER_HANDOFF.md the per-WI map; this is the state of knowledge.
 
 Scope: the 2026-08-14/15 session on the cluster `24g` instance, which trained
 seven models (six VICReg arms + two MAE variants) and probed all of them
-(§1–§8); and the 2026-08-15/16 session on a `data` instance, which fetched the
+(§1–§8); the 2026-08-15/16 session on a `data` instance, which fetched the
 two corpora that were missing — NVIDIA's per-pixel label maps (§9) and the
-Stanford FSA transfer set (§10).
+Stanford FSA transfer set (§10); and the 2026-08-16/17 session, which **ran**
+the crop-level anatomy columns and the qualitative pass (§11, §12).
 
 ---
 
@@ -46,6 +47,23 @@ decay to ~160 over the remaining 219 epochs. The barely-trained model has the
 better representation. A falling RankMe is therefore not automatically
 "collapse" — check where it started.
 
+**5. Policy A carries crop-level anatomy, and this is the project's strongest
+evidence for the actual thesis** (added 2026-08-17, §11). Policy A wins all
+three crop-level anatomy targets at **every K and on both splits**, with CI
+separation in 17 of 18 cells:
+
+| target (K=4 train) | A | B | random | trivial |
+|---|---|---|---|---|
+| contains_cyst (BA) | **0.951** | 0.909 | 0.792 | 0.784 |
+| cyst_fraction_crop | **0.792** | 0.786 | 0.464 | 0.362 |
+| sos_mean_crop | **0.720** | 0.615 | 0.482 | 0.300 |
+
+This matters more than the frame-level `cyst_fraction` row (§3.2), which tops
+out at +0.331 against a +0.170 trivial control. ⚠ **Not yet controlled for
+geometry** — cysts have a spatial distribution and `z_centre` alone probes at
++0.699, so the residual question "is this partly *where the crop came from*"
+is open. §12 has the one number that bears on it.
+
 ---
 
 ## 2. What exists on disk
@@ -56,15 +74,20 @@ better representation. A falling RankMe is therefore not automatically
 | local staged copy | `/tmp/wi8_fsa_k16.zarr` | **ephemeral** — wiped on container restart |
 | per-pixel label maps | `/mnt/home/benbarkow/stores/wi8_label_maps/` | 923 frames, 1.9 GB — `seg` `(N,507,456)` u8, `sos` `(N,32,32)` f32, `bmode`/`bmode_focused` `(N,507,456)` f32. Read with `ssl_us.data.label_maps.open_label_maps` |
 | Stanford FSA corpus | `/mnt/home/benbarkow/stores/wi16_stanford_fsa.zarr` | 117 frames, `(N,192,192,287)` complex64, 8.8 GB — baseband IQ, **not** beamformed. Read with `ssl_us.data.stanford_fsa.open_fsa_store`. See §10 |
-| VICReg K=4 | `checkpoints/wi12_vicreg_policy{A,B}/` | |
-| VICReg K=16, K=1 | `checkpoints/wi13_vicreg_k{16,1}_policy{A,B}/` | |
-| MAE normalized | `checkpoints/wi14_mae_k4/` | trains on noise — see §4 |
-| MAE raw-target | `checkpoints/wi14_mae_k4_rawtarget/` | the fair baseline |
+| VICReg K=4 | `~/checkpoints/wi12_vicreg_policy{A,B}/` | |
+| VICReg K=16, K=1 | `~/checkpoints/wi13_vicreg_k{16,1}_policy{A,B}/` | |
+| MAE normalized | `~/checkpoints/wi14_mae_k4/` | trains on noise — see §4 |
+| MAE raw-target | `~/checkpoints/wi14_mae_k4_rawtarget/` | the fair baseline |
 | all logs | `/mnt/home/benbarkow/logs/` | |
 | committed results | `tests/data/wi13_*.json`, `tests/data/wi14_*.json` | `figures/` is gitignored |
+| qualitative pass | `tests/data/wi13_k4_{train,validation}_{qual_results.json,clusters.md}` | §12 |
 
-`checkpoints/` totals 19 GB and is gitignored. Each `<dir>/last.pt` resumes;
-`history.json` and `run_config.json` sit beside it.
+⚠ **The checkpoints are at `/mnt/home/benbarkow/checkpoints/`, one level above
+the repo — not the repo's own `checkpoints/`,** which still holds two retired
+phase-1 files (`best_dnorm_checkpoint.pt`, `best_mae_checkpoint.pt`) and none
+of this work. That is what `--checkpoint-root` defaults to. The directory
+totals 19 GB. Each `<dir>/last.pt` resumes; `history.json` and
+`run_config.json` sit beside it.
 
 ---
 
@@ -100,9 +123,17 @@ from ~347, K=1 climbs from ~264).
 | cyst_fraction | **+0.331** | +0.312 | +0.025 | +0.097 | +0.128 | +0.001 | +0.170 |
 | z_centre | +0.699 | **+0.756** | +0.314 | +0.388 | +0.645 | −0.001 | +0.541 |
 | x_centre | **+0.537** | −0.001 | +0.002 | +0.013 | +0.177 | −0.000 | −0.000 |
+| contains_cyst † | **+0.951** | +0.909 | +0.587 | +0.709 | +0.792 | +0.510 | +0.784 |
+| cyst_fraction_crop | **+0.792** | +0.786 | +0.072 | +0.204 | +0.464 | −0.005 | +0.362 |
+| sos_mean_crop | **+0.720** | +0.615 | +0.567 | +0.431 | +0.482 | −0.001 | +0.300 |
 
 R² except † (balanced accuracy). Validation split (n_eff 93) is in
 `tests/data/wi13_k4_validation_results.json` and agrees closely.
+
+The last three rows are the crop-level anatomy targets, run 2026-08-17 (§11).
+`n_eff` is 6136 rather than 6640 for the two cyst rows — crops from the 75
+empty-`segmentation_map` frames are dropped (PLAN.md §2.6). The other seven
+rows reproduced **bitwise** when these were added; that check is §11.1.
 
 ### 3.3 K-ablation, train split, each column vs its **own** controls
 
@@ -240,7 +271,7 @@ health by the log's pairs/s, not instantaneous utilisation); MAE ~1750 crops/s.
 
 ```bash
 source /opt/venvs/.venv/bin/activate          # PyTorch; .venv-zea for beamforming
-pytest -q                                     # 325 passed, 6 skipped (skips = data/rats/)
+pytest -q                                     # 331 passed, 6 skipped (skips = data/rats/)
 ruff check .
 
 setsid nohup bash scripts/wi12_run_both.sh   >> logs/wi12_night.log 2>&1 </dev/null &   # VICReg K=4 A,B
@@ -270,22 +301,37 @@ on crops it never saw.
 
 | # | item | where | cost |
 |---|---|---|---|
-| 1 | **Write-up.** Results exist only as JSON + tables. Nothing outside this repo is readable. | — | — |
-| 2 | ~~Fetch the per-pixel maps and wire them into `wi13_matrix.py`.~~ **DONE 2026-08-16** — see §9/§11. Remaining: *run* the columns, which belongs on a GPU box (minutes there, hours on `data`). | `24g` | ~10 min |
-| 3 | **WI-16 beamforming.** The Stanford FSA corpus is built (§10); turning it into K-sector stores — both grid variants — is not. `AngularSectorSum` applies unchanged; the constants and `t0_s` do not. | `12g` | ~2 h |
-| 4 | MAE at patch 4 as a full run — the only config that showed signal | `24g` | ~4 h+ |
-| 5 | WI-15 cross-aperture arm (optional in PLAN.md) | `24g` | ~3 h |
-| 6 | WI-9 HuggingFace publication (distribution, not science) | `data` | — |
-| 7 | K = 8 column — dropped per PLAN.md §5.5 cut-list item 4 | — | — |
+| 1 | **WI-16 transfer.** The Stanford FSA corpus is built (§10); beamforming it to K-sector stores — both grid variants — and probing it is not. `AngularSectorSum` applies unchanged; the constants and `t0_s` do not. **The whole project is currently simulation-only.** | `12g` | ~2 h |
+| 2 | **Write-up.** Results exist only as JSON + tables under `tests/data/`. Nothing outside this repo is readable. | — | — |
+| 3 | **Geometry-controlled anatomy probes.** §1.5's headline is uncontrolled for crop position; re-probe on geometry-residualised features (`viz.regress_out_geometry` already computes them for the figures). | `24g` | ~20 min |
+| 4 | **An external frozen baseline** — DINOv2-small on the free `bmode` stage. Baselines 5–8 of PLAN.md §4.4 are all unimplemented, so "does this beat an off-the-shelf encoder" is unanswered. | `24g` | ~20 min |
+| 5 | MAE at patch 4 as a full run — the only config that showed signal | `24g` | ~4 h+ |
+| 6 | WI-15 cross-aperture arm (optional in PLAN.md; `models/xaperture.py` exists and is tested, never trained) | `24g` | ~3 h |
+| 7 | WI-9 HuggingFace publication (distribution, not science) | `data` | — |
+| 8 | K = 8 column — dropped per PLAN.md §5.3 cut-list item 4. Recorded in every column's `not_run`. | — | — |
+
+~~Fetch the per-pixel maps, wire them in, and run the columns.~~ **DONE** —
+maps 2026-08-16 (§9), wiring 2026-08-16, columns run 2026-08-17 (§11).
 
 Stanford is no longer missing — see §10. It came from figshare, not from the
 Mac, and it is **native FSA**, which deletes WI-16's `Refocus` step.
 
-Open question worth stating plainly: **every trained encoder ties or loses to
-`trivial` on `phase_error`** at K=4/K=1 — two numbers, envelope mean and std,
-handicapped 32:1 by `capacity_control`. Only K=16 Policy A clears it. Either
-phase error is not recoverable from these crops beyond global brightness, or
-the probe protocol is not the right instrument for it.
+**Three open questions worth stating plainly.**
+
+1. **Every trained encoder ties or loses to `trivial` on `phase_error`** at
+   K=4/K=1 — two numbers, envelope mean and std, handicapped 32:1 by
+   `capacity_control`. Only K=16 Policy A clears it. Either phase error is not
+   recoverable from these crops beyond global brightness, or the probe protocol
+   is not the right instrument for it.
+2. **The physics story is thinner than the headline number suggests.**
+   `sos_mean_frame` = +0.899 is the best cell in the matrix, but `trivial`
+   scores +0.671 and an *untrained* ResNet-18 scores +0.800 — so the learned
+   contribution is +0.10, and most of the signal is global brightness. On
+   `sos_std_frame` (+0.277 vs +0.280 trivial) there is nothing at K=4. Of the
+   three physics axes only one has a real margin. Report deltas, not absolutes.
+3. **K is confounded with crop geometry by design** (§3.3), so the ladder
+   cannot attribute anything to sector count. One K=4 arm trained at 64 px
+   below z = 8 mm would decouple it for ~1.5 h + a probe column.
 
 ---
 
@@ -441,22 +487,25 @@ inference.
 
 ---
 
-## 11. The crop-level anatomy cells now run (2026-08-16)
+## 11. The crop-level anatomy cells are RUN (2026-08-17)
 
-WI-13 has reported three cells in `not_run` since it was written —
-`contains_cyst`, `cyst_fraction_crop`, `sos_mean_crop`. They are wired up
-against §9's maps and verified end to end; what is left is running the two
-columns on a GPU box.
+WI-13 reported three cells in `not_run` from the day it was written —
+`contains_cyst`, `cyst_fraction_crop`, `sos_mean_crop`. **All six columns have
+now been run with them** (K ∈ {1,4,16} × {train, validation}), so every WI-13
+column carries all ten targets and `not_run` is down to the K=8 cut alone.
+Results are the numbers in §1.5 and §3.2; the durable copies are the six
+`tests/data/wi13_k*_results.json`, which the anatomy run **supersedes**.
 
 ```bash
-python scripts/wi13_matrix.py --k 4 --split validation --crops-per-frame 32 --out figures/wi13_k4_validation
-python scripts/wi13_matrix.py --k 4 --split train      --crops-per-frame 8  --out figures/wi13_k4_train
+bash scripts/wi13_anatomy_columns.sh      # all six columns, ~2 h on `data`
+python scripts/wi13_anatomy_verify.py     # the reproduction gate, BEFORE promoting
 ```
 
-Those are the settings the committed columns used, so the seven existing
-targets must reproduce **exactly** — same crops, same seed, same features. They
-are the check that adding the anatomy targets perturbed nothing. Repeat for
-K=16 and K=1 to fill the ablation.
+Per-column settings are baked into the runner because they are not preferences:
+`--crops-per-frame` is 32 for validation (93 frames) and 8 for train (830),
+which is what every committed column used, and crop geometry comes from K via
+`LoaderConfig.for_arm`. Changing either would change which crops each encoder
+sees and silently invalidate the comparison below.
 
 **Naming, deliberately.** The crop-level targets are suffixed `_crop`.
 `cyst_fraction` in every table above is the *frame-level* quantity from
@@ -470,7 +519,33 @@ dropped count is reported in the log and in `results.json`. `sos_mean_crop`
 keeps every crop — the sound-speed map is dense on those frames; only the
 segmentation is missing.
 
-### 11.1 Two things this cost, worth knowing
+### 11.1 The reproduction gate, and the one thing that did move
+
+Adding targets must not perturb the seven that were already reported: same
+crops, same seed, same checkpoints, same probes. So every pre-existing
+`(encoder, target)` cell had to come back identical, and
+`scripts/wi13_anatomy_verify.py` is that check.
+
+**Result: all 238 shared cells reproduced `score` and `n_eff` bitwise.** The
+anatomy targets are purely additive.
+
+⚠ **One caveat, unexplained.** The two MAE encoders' bootstrap bounds
+(`score_lo`/`score_hi`) moved on the two K=4 columns — by **≤ 3.6e-6**, against
+interval widths of ~0.1, so five orders of magnitude below what any conclusion
+rests on. No non-MAE encoder moved at all, and no `score` or `n_eff` moved
+anywhere. The obvious causes were checked and **ruled out**: the MAE encoder is
+bit-identical on repeat, invariant to batch chunking, and invariant to BLAS
+thread count. The feature cache and staged store were wiped by a container
+restart before this was chased further, and re-deriving costs a full NFS
+re-read for no change in any reported number. `--rtol 1e-5` is what the gate
+needs to pass; the default stays exact so this cannot be forgotten.
+
+⚠ The gate is **pre-promotion only**. Now that the anatomy columns have been
+copied into `tests/data/`, re-running it compares a file to its own copy and
+passes for free — the script's docstring carries the git incantation to
+reproduce the real check against `1147c19`.
+
+### 11.2 Two things this cost, worth knowing
 
 1. **The `data` instance has a 4 GB cgroup, not the 31 GB `free` reports.**
    Materializing all 6640 train crops is 3.5 GB and got OOM-killed. Check
@@ -487,3 +562,51 @@ segmentation is missing.
 Feature extraction on the `data` instance is ~3 min per 120 crops across seven
 encoders on **one core** — the `24g` box does the whole column in minutes.
 CLAUDE.md already maps results-matrix runs to `24g`; that is not a preference.
+
+---
+
+## 12. The qualitative pass — and why clustering is a null result (2026-08-17)
+
+`scripts/wi13_qualitative.py` (+ `wi13_qualitative_columns.sh`) produces, for
+K=4 on both splits: a PCA/t-SNE/UMAP **encoder grid** — one row per colour key,
+one column per encoder, so the label is held fixed and the encoder varies —
+each in a plain and a geometry-residualised variant, plus per-encoder k-means
+(k ∈ {2,4,8,16}) and DBSCAN. Durable copies: `tests/data/wi13_k4_*_qual_results.json`
+and `tests/data/wi13_k4_*_clusters.md`.
+
+**The headline is negative, and it should be reported as a finding rather than
+left as a table of small numbers: the learned representations have no discrete
+cluster structure at all.**
+
+| encoder | silhouette (k=4) | best ari_cyst | ari_depth_quartile (k=4) |
+|---|---|---|---|
+| vicreg_A | +0.031 | +0.131 | +0.124 |
+| vicreg_B | +0.022 | +0.147 | +0.043 |
+| mae_raw | +0.041 | +0.064 | +0.093 |
+| random_resnet18 | +0.310 | +0.021 | +0.182 |
+| pca_raw | **+0.658** | +0.030 | +0.002 |
+| trivial | +0.475 | +0.036 | +0.193 |
+
+⚠ **A high silhouette here is a bad sign, not a good one.** `pca_raw` and
+`trivial` score 0.48–0.66 because they cluster on overall brightness — one
+strong axis, cleanly separable, carrying no tissue. The VICReg arms sit at
+0.02–0.05 and top out at ARI 0.147 against the cyst label. DBSCAN agrees:
+7 clusters at **91–97 % noise** for the VICReg arms, 1 cluster for everything
+else. The representation is a **continuous manifold that linear probes read
+well and k-means cannot** — which is consistent with §3.2, not in tension with
+it, but it does close off any "the model discovers tissue classes" reading.
+
+**Geometry variance explained** (linear (z,x) regressed out of the features):
+
+| | vicreg_A | vicreg_B | mae_raw | random_resnet18 |
+|---|---|---|---|---|
+| train | 7.1 % | 5.1 % | 3.0 % | **37.0 %** |
+| validation | 7.9 % | 5.6 % | 3.6 % | **34.9 %** |
+
+So Policy A spends ~7 % of its feature variance on where the crop came from,
+against **35–37 % for the untrained ResNet-18** — a random CNN is largely a
+position encoder, and training buys a five-fold reduction in that. This is the
+one number that bears on §1.5's open question, and it is *suggestive but not
+sufficient*: it bounds the linear geometry component of the features globally,
+not the geometry component of the `contains_cyst` probe specifically. §8 item 3
+is the probe that would actually settle it.
