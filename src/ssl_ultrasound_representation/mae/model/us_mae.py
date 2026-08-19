@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+MASK_MODES = ("random", "fixed", "stride", "block")
+
 
 class SignalMAE(nn.Module):
     """
@@ -17,6 +19,15 @@ class SignalMAE(nn.Module):
 
     Patches are embedded with a small CNN over (transducer, depth) instead
     of a flat linear layer to keep parameters reasonable.
+
+    ``mask_mode`` selects how the hidden tokens are picked:
+        "random" - fresh pattern per sample and per step (standard training)
+        "fixed"  - seeded random pattern, same spread as "random" but frozen
+        "stride" - keep every k-th token, evenly spaced over the grid
+        "block"  - keep the leading tokens, mask one contiguous tail
+    The last three are deterministic — identical on every forward pass and for
+    every sample in the batch — which removes mask sampling as a variable when
+    debugging (e.g. checking the model can overfit a single sample).
     """
 
     def __init__(
@@ -34,8 +45,13 @@ class SignalMAE(nn.Module):
         decoder_heads=4,
         dim_feedforward=512,
         mask_ratio=0.0,
+        mask_mode="random",
+        mask_seed=0,
     ):
         super().__init__()
+        assert mask_mode in MASK_MODES, (
+            f"mask_mode must be one of {MASK_MODES}, got {mask_mode!r}"
+        )
         assert n_samples % depth_window == 0, (
             f"n_samples ({n_samples}) must be divisible by depth_window ({depth_window})"
         )
@@ -57,6 +73,8 @@ class SignalMAE(nn.Module):
         self.embed_dim = embed_dim
         self.decoder_embed_dim = decoder_embed_dim
         self.mask_ratio = mask_ratio
+        self.mask_mode = mask_mode
+        self.mask_seed = mask_seed
 
         # -------------------------------------------------------------------------
         # 1. MAE ENCODER MODULES
@@ -84,6 +102,13 @@ class SignalMAE(nn.Module):
         self._feat_chw = tuple(feat.shape[1:])  # (C, H, W) at the bottleneck
         self._conv_sizes = sizes  # [(tw, w), s1, s2, s3]
         self.patch_proj = nn.Linear(feat.flatten(1).shape[1], embed_dim)
+        # Normalize the patch embedding before the positional encoding is added.
+        # Without it the conv+Linear stack emits tokens with std ~0.02 at init
+        # while the sinusoidal encoding sits at ~0.55, so the encoder input is
+        # ~97% position and ~3% content: the model has to spend its first
+        # hundreds of steps just learning to amplify patch_proj before patch
+        # content influences anything. LayerNorm puts both at unit scale.
+        self.patch_norm = nn.LayerNorm(embed_dim)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
@@ -143,13 +168,14 @@ class SignalMAE(nn.Module):
                 deconv_layers.append(nn.GELU())
         self.patch_deconv = nn.Sequential(*deconv_layers)
 
-    def forward(self, x, pos_embed):
+    def forward(self, x, pos_embed, mask_mode=None):
         """
         Args:
             x: frame batch (B, transducer, scanline, iq, sample),
                single focal zone already selected.
             pos_embed: encoder positional encoding (num_tokens, embed_dim),
                token order (scanline, transducer_group, depth_window) row-major.
+            mask_mode: overrides ``self.mask_mode`` for this call.
 
         Returns:
             pred:   (B, num_tokens, patch_dim) reconstructed patches
@@ -164,11 +190,15 @@ class SignalMAE(nn.Module):
         tok = self.patch_conv(
             patches.reshape(B * L, 2, self.transducer_window, self.depth_window)
         )
-        tok = self.patch_proj(tok.flatten(1)).view(B, L, self.embed_dim)
+        tok = self.patch_norm(self.patch_proj(tok.flatten(1))).view(
+            B, L, self.embed_dim
+        )
         tok = tok + pos_embed.unsqueeze(0).to(tok.dtype)
 
-        # --- 2. Random masking over the token grid ---
-        tok, mask, ids_restore, len_keep = self.random_masking(tok, self.mask_ratio)
+        # --- 2. Masking over the token grid (random or deterministic) ---
+        tok, mask, ids_restore, len_keep = self.random_masking(
+            tok, self.mask_ratio, mask_mode
+        )
 
         # --- 3. ENCODER (visible tokens only) ---
         z = self.encoder_norm(self.encoder(tok))
@@ -217,7 +247,9 @@ class SignalMAE(nn.Module):
         tok = self.patch_conv(
             patches.reshape(B * L, 2, self.transducer_window, self.depth_window)
         )
-        tok = self.patch_proj(tok.flatten(1)).view(B, L, self.embed_dim)
+        tok = self.patch_norm(self.patch_proj(tok.flatten(1))).view(
+            B, L, self.embed_dim
+        )
         tok = tok + pos_embed.unsqueeze(0).to(tok.dtype)
         z = self.encoder_norm(self.encoder(tok))  # (B, L, embed_dim)
         if pool == "mean":
@@ -251,9 +283,47 @@ class SignalMAE(nn.Module):
         x = x.permute(0, 2, 5, 1, 4, 3, 6).contiguous()
         return x.view(B, G * tw, Sc, 2, W * w)
 
-    def random_masking(self, x, mask_ratio):
+    def mask_ids_shuffle(self, B, L, len_keep, device, mask_mode=None):
         """
-        Standard MAE per-token random masking.
+        Build the token ordering masking works on: the first ``len_keep``
+        entries of each row are the tokens to keep, the rest are masked.
+
+        ``mask_mode`` overrides ``self.mask_mode`` for this call; see the class
+        docstring for what each mode does. Token index order is
+        (scanline, transducer_group, depth_window) row-major, so "block" hides
+        a contiguous span of the last scanlines and "stride" spreads the kept
+        tokens evenly across that grid.
+        """
+        mode = self.mask_mode if mask_mode is None else mask_mode
+        if mode not in MASK_MODES:
+            raise ValueError(f"mask_mode must be one of {MASK_MODES}, got {mode!r}")
+
+        if mode == "random":
+            noise = torch.rand(B, L, device=device)
+            return torch.argsort(noise, dim=1)
+
+        if mode == "fixed":
+            # Seeded on the CPU so the pattern is identical across devices/runs.
+            generator = torch.Generator().manual_seed(self.mask_seed)
+            noise = torch.rand(1, L, generator=generator).to(device)
+            ids_shuffle = torch.argsort(noise, dim=1)
+        elif mode == "stride":
+            tokens = torch.arange(L, device=device)
+            step = max(1, L // max(1, len_keep))
+            ids_keep = tokens[::step][:len_keep]
+            kept = torch.zeros(L, dtype=torch.bool, device=device)
+            kept[ids_keep] = True
+            ids_shuffle = torch.cat([ids_keep, tokens[~kept]]).unsqueeze(0)
+        else:  # "block"
+            ids_shuffle = torch.arange(L, device=device).unsqueeze(0)
+
+        # Same deterministic pattern for every sample in the batch.
+        return ids_shuffle.expand(B, -1).contiguous()
+
+    def random_masking(self, x, mask_ratio, mask_mode=None):
+        """
+        MAE per-token masking, random or deterministic (see ``mask_mode`` in the
+        class docstring; ``mask_mode`` here overrides ``self.mask_mode``).
 
         Returns the kept tokens, a (B, L) binary mask (1 = masked), restore
         indices, and the number of kept tokens. With mask_ratio <= 0 the
@@ -266,8 +336,7 @@ class SignalMAE(nn.Module):
             return x, mask, ids_restore, L
 
         len_keep = max(1, int(L * (1 - mask_ratio)))
-        noise = torch.rand(B, L, device=x.device)
-        ids_shuffle = torch.argsort(noise, dim=1)
+        ids_shuffle = self.mask_ids_shuffle(B, L, len_keep, x.device, mask_mode)
         ids_restore = torch.argsort(ids_shuffle, dim=1)
         ids_keep = ids_shuffle[:, :len_keep]
         x_masked = torch.gather(x, 1, ids_keep.unsqueeze(-1).expand(-1, -1, D))
