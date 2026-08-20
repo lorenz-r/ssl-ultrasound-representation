@@ -78,6 +78,98 @@ def _corr_real(
     return rho[valid].mean()
 
 
+# ── individual terms ────────────────────────────────────────────────────────
+# Each takes complex `zp`, `zg` and a float weight map `m` (1 = count this
+# position). Passing all-ones reduces over the full signal instead of the masked
+# subset, which is how the "_all" diagnostics are produced.
+
+
+def complex_mse_term(zp, zg, m, eps: float = 1e-6):
+    """`mean |z_pred - z_gt|^2`."""
+    return _masked_mean((zp - zg).abs().pow(2), m)
+
+
+def log_envelope_term(zp, zg, m, eps: float = 1e-6):
+    """L1 on `log|z|` — mirrors the log compression a B-mode display applies."""
+    return _masked_mean(
+        (torch.log(zp.abs() + eps) - torch.log(zg.abs() + eps)).abs(), m
+    )
+
+
+def envelope_mse_term(zp, zg, m, eps: float = 1e-6):
+    """MSE on the linear envelope. Phase-blind by construction — it is the term
+    that looked healthy while `complex_corr_coeff` sat at zero, so it is worth
+    logging next to `phase` as the contrast."""
+    return _masked_mean((zp.abs() - zg.abs()).pow(2), m)
+
+
+def phase_term(zp, zg, m, eps: float = 1e-6):
+    """`1 - Re(rho)` per trace — the direct surrogate for `complex_corr_coeff`."""
+    return 1.0 - _corr_real(zp, zg, m, dim=1)
+
+
+def spectral_term(zp, zg, m, eps: float = 1e-6):
+    """Fast-time Fourier magnitude + phase agreement, tied to `spectral_coherence`.
+
+    Runs on the composite trace the model would actually emit — ground truth
+    where visible, prediction where masked — so it measures the spectral damage
+    the fill-in does rather than re-scoring positions the model was handed. With
+    an all-ones `m` the composite is simply the prediction.
+    """
+    z_comp = torch.where(m.bool(), zp, zg)
+    Zp = torch.fft.fft(z_comp, dim=1)
+    Zg = torch.fft.fft(zg, dim=1)
+    mag = (torch.log(Zp.abs() + eps) - torch.log(Zg.abs() + eps)).abs().mean()
+    corr = _corr_real(Zp, Zg, torch.ones_like(Zg.real), dim=1)
+    return mag + (1.0 - corr)
+
+
+_TERMS = {
+    "complex_mse": complex_mse_term,
+    "log_envelope": log_envelope_term,
+    "envelope_mse": envelope_mse_term,
+    "phase": phase_term,
+    "spectral": spectral_term,
+}
+RF_METRICS = tuple(_TERMS)
+
+
+@torch.no_grad()
+def compute_metrics(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    names: "list[str] | tuple[str, ...]",
+    eps: float = 1e-6,
+) -> dict[str, torch.Tensor]:
+    """Diagnostic reconstruction metrics — for monitoring, not optimisation.
+
+    Dense counterpart of `mae/model/loss.compute_metrics`, and the same
+    convention: each name is reduced twice, over the masked positions
+    ("<name>_masked", what the model is actually asked to predict) and over every
+    position ("<name>_all"). Spec §4 asks for exactly this — the terms are
+    optimised on masked positions but reported on the full signal too, because
+    with a masked objective the visible region receives no gradient and a
+    whole-frame reconstruction can be far worse than the loss suggests.
+
+    Complements `eval.metrics` (physics fidelity on whole frames, every
+    `vis_every` epochs); this is the loss-family breakdown, every batch.
+    """
+    zp, zg = to_complex(pred), to_complex(target)
+    m = mask.float()
+    if m.ndim == 4:
+        m = m[:, 0]
+    ones = torch.ones_like(m)
+    out: dict[str, torch.Tensor] = {}
+    for name in names:
+        if name not in _TERMS:
+            raise ValueError(f"unknown metric {name!r}; valid: {RF_METRICS}")
+        fn = _TERMS[name]
+        out[f"{name}_masked"] = fn(zp, zg, m, eps).detach()
+        out[f"{name}_all"] = fn(zp, zg, ones, eps).detach()
+    return out
+
+
 @dataclass
 class LossWeights:
     """Spec §4: start with the complex and phase terms large relative to envelope.
@@ -114,27 +206,10 @@ class RFMaeLoss(nn.Module):
         if m.ndim == 4:
             m = m[:, 0]
 
-        complex_mse = _masked_mean((zp - zg).abs().pow(2), m)
-        log_env = _masked_mean(
-            (torch.log(zp.abs() + self.eps) - torch.log(zg.abs() + self.eps)).abs(), m
-        )
+        complex_mse = complex_mse_term(zp, zg, m, self.eps)
+        log_env = log_envelope_term(zp, zg, m, self.eps)
         corr = _corr_real(zp, zg, m, dim=1)
-
-        # Spectral terms run on the composite trace the model would actually
-        # emit — ground truth where visible, prediction where masked — so they
-        # measure the spectral damage the fill-in does rather than re-scoring
-        # positions the model was handed.
-        mb = m.bool()
-        z_comp = torch.where(mb, zp, zg)
-        Zp = torch.fft.fft(z_comp, dim=1)
-        Zg = torch.fft.fft(zg, dim=1)
-        ones = torch.ones_like(Zg.real)
-        spec_mag = (
-            torch.log(Zp.abs() + self.eps) - torch.log(Zg.abs() + self.eps)
-        ).abs().mean()
-        spec_corr = _corr_real(Zp, Zg, ones, dim=1)
-        spectral = spec_mag + (1.0 - spec_corr)
-
+        spectral = spectral_term(zp, zg, m, self.eps)
         full_mse = (zp - zg).abs().pow(2).mean()
 
         total = (
@@ -149,8 +224,6 @@ class RFMaeLoss(nn.Module):
             "log_envelope": log_env.detach(),
             "phase": (1.0 - corr).detach(),
             "spectral": spectral.detach(),
-            "spectral_mag": spec_mag.detach(),
-            "spectral_corr": spec_corr.detach(),
             "full_mse": full_mse.detach(),
             "complex_corr_masked": corr.detach(),
             "mask_frac": m.mean().detach(),

@@ -40,7 +40,12 @@ from ssl_ultrasound_representation.mae.model.rf_conv_mae import (
     fold_frame,
     unfold_frame,
 )
-from ssl_ultrasound_representation.mae.model.rf_losses import LossWeights, RFMaeLoss
+from ssl_ultrasound_representation.mae.model.rf_losses import (
+    RF_METRICS,
+    LossWeights,
+    RFMaeLoss,
+    compute_metrics,
+)
 from ssl_ultrasound_representation.mae.model.rf_masking import RFMasker
 from ssl_ultrasound_representation.train import (
     default_device,
@@ -123,6 +128,14 @@ def train(config: dict | None = None) -> dict:
         num_workers = min(num_workers, os.cpu_count() or 1)
     vis_every = config.get("vis_every", 10)
     save_checkpoints = config.get("save_checkpoints", True)
+    # Loss-family diagnostics logged every epoch beside the optimised loss, each
+    # reduced over the masked positions and over the full signal (spec §4 asks
+    # for both). Distinct from the `physics/*` metrics, which run on whole frames
+    # every `vis_every` epochs.
+    metrics = tuple(config.get("metrics", ("complex_mse", "phase")))
+    unknown = [m for m in metrics if m not in RF_METRICS]
+    if unknown:
+        raise ValueError(f"unknown metric(s) {unknown}; valid: {list(RF_METRICS)}")
 
     # ── model / masker / loss ──────────────────────────────────────────────
     model_cfg = RFMaeConfig(
@@ -225,6 +238,7 @@ def train(config: dict | None = None) -> dict:
             "l_min": config.get("l_min", 8),
             "l_max": model_cfg.l_max,
             "p_chan": config.get("p_chan", 0.1),
+            "metrics": list(metrics),
             **criterion.config(),
             **model.describe(),
         },
@@ -288,6 +302,8 @@ def train(config: dict | None = None) -> dict:
             sums["loss"] = sums.get("loss", 0.0) + float(loss.detach())
             for k, v in parts.items():
                 sums[k] = sums.get(k, 0.0) + float(v)
+            for k, v in compute_metrics(pred.float(), x.float(), mask, metrics).items():
+                sums[k] = sums.get(k, 0.0) + float(v)
             n_steps += 1
 
         train_log = {f"train/{k}": v / max(n_steps, 1) for k, v in sums.items()}
@@ -307,14 +323,22 @@ def train(config: dict | None = None) -> dict:
                 vsums["loss"] = vsums.get("loss", 0.0) + float(loss)
                 for k, v in parts.items():
                     vsums[k] = vsums.get(k, 0.0) + float(v)
+                for k, v in compute_metrics(pred, x.float(), mask, metrics).items():
+                    vsums[k] = vsums.get(k, 0.0) + float(v)
                 v_steps += 1
         val_log = {f"val/{k}": v / max(v_steps, 1) for k, v in vsums.items()}
         val_corr = val_log.get("val/complex_corr_masked", float("nan"))
 
+        metric_str = "".join(
+            f"  |  {k}: {val_log[f'val/{k}_masked']:.5f}"
+            for k in metrics
+            if f"val/{k}_masked" in val_log
+        )
         print(
             f"Epoch {epoch:3d}  |  train {train_log['train/loss']:.5f}  |  "
             f"val {val_log.get('val/loss', float('nan')):.5f}  |  "
             f"corr_masked {val_corr:.4f}  |  lr {scheduler.get_last_lr()[0]:.2e}"
+            f"{metric_str}"
         )
         monitor.log_epoch(epoch, {**train_log, **val_log})
 
@@ -379,7 +403,25 @@ def main() -> None:
     p.add_argument("--w-phase", type=float, dest="w_phase")
     p.add_argument("--w-spec", type=float, dest="w_spec")
     p.add_argument("--w-full", type=float, dest="w_full")
+    p.add_argument(
+        "--metrics",
+        nargs="+",
+        choices=RF_METRICS,
+        help="Extra reconstruction metrics logged every epoch (not optimised). "
+        "Each is logged over the masked positions and over the full signal: "
+        "train/<name>_masked, val/<name>_all, etc. Default: complex_mse phase.",
+    )
     p.add_argument("--hf-repo", dest="hf_repo")
+    p.add_argument(
+        "--hf-token",
+        dest="hf_token",
+        help="HuggingFace token for the dataset download — authenticated "
+        "requests get much higher rate limits, so the per-chunk fetch stops "
+        "stalling on 429 backoff. Falls back to $HF_TOKEN / "
+        "$HUGGING_FACE_HUB_TOKEN / a cached `huggingface-cli login` when "
+        "omitted; prefer those over the flag to keep the token out of shell "
+        "history and `ps` output.",
+    )
     p.add_argument("--max-frames", type=int, dest="max_frames")
     p.add_argument("--data-zip", dest="data_zip")
     p.add_argument("--data-metadata", dest="data_metadata")
