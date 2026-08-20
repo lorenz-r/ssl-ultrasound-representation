@@ -136,6 +136,10 @@ def train(config: dict | None = None) -> dict:
     unknown = [m for m in metrics if m not in RF_METRICS]
     if unknown:
         raise ValueError(f"unknown metric(s) {unknown}; valid: {list(RF_METRICS)}")
+    # Model selection reads `correlation` (spec §5), so compute it even when the
+    # caller did not ask for it — otherwise the gate has nothing to read.
+    if "correlation" not in metrics:
+        metrics = metrics + ("correlation",)
 
     # ── model / masker / loss ──────────────────────────────────────────────
     model_cfg = RFMaeConfig(
@@ -230,7 +234,11 @@ def train(config: dict | None = None) -> dict:
         config={
             "arch": "rf_conv_mae",
             "lr": lr,
+            "lr_schedule": lr_schedule,
+            "weight_decay": weight_decay,
             "epochs": epochs,
+            "warmup_epochs": warmup_epochs,
+            "grad_clip": grad_clip,
             "batch_size": batch_size,
             "rows_per_frame": rows_per_frame,
             "lateral": lateral,
@@ -301,7 +309,8 @@ def train(config: dict | None = None) -> dict:
 
             sums["loss"] = sums.get("loss", 0.0) + float(loss.detach())
             for k, v in parts.items():
-                sums[k] = sums.get(k, 0.0) + float(v)
+                key = f"loss_terms/{k}"
+                sums[key] = sums.get(key, 0.0) + float(v)
             for k, v in compute_metrics(pred.float(), x.float(), mask, metrics).items():
                 sums[k] = sums.get(k, 0.0) + float(v)
             n_steps += 1
@@ -322,12 +331,16 @@ def train(config: dict | None = None) -> dict:
                 loss, parts = criterion(pred.float(), x.float(), mask)
                 vsums["loss"] = vsums.get("loss", 0.0) + float(loss)
                 for k, v in parts.items():
-                    vsums[k] = vsums.get(k, 0.0) + float(v)
+                    key = f"loss_terms/{k}"
+                    vsums[key] = vsums.get(key, 0.0) + float(v)
                 for k, v in compute_metrics(pred, x.float(), mask, metrics).items():
                     vsums[k] = vsums.get(k, 0.0) + float(v)
                 v_steps += 1
         val_log = {f"val/{k}": v / max(v_steps, 1) for k, v in vsums.items()}
-        val_corr = val_log.get("val/complex_corr_masked", float("nan"))
+        # Re(rho) on masked positions is exactly `1 - correlation`. Reading it
+        # off the logged metric keeps the gated quantity and the plotted one the
+        # same number.
+        val_corr = 1.0 - val_log.get("val/correlation_masked", float("nan"))
 
         metric_str = "".join(
             f"  |  {k}: {val_log[f'val/{k}_masked']:.5f}"
@@ -335,9 +348,10 @@ def train(config: dict | None = None) -> dict:
             if f"val/{k}_masked" in val_log
         )
         print(
-            f"Epoch {epoch:3d}  |  train {train_log['train/loss']:.5f}  |  "
-            f"val {val_log.get('val/loss', float('nan')):.5f}  |  "
-            f"corr_masked {val_corr:.4f}  |  lr {scheduler.get_last_lr()[0]:.2e}"
+            f"Epoch {epoch:3d}  |  "
+            f"train loss: {train_log['train/loss']:.6f}  |  "
+            f"val loss:   {val_log.get('val/loss', float('nan')):.6f}  |  "
+            f"lr: {scheduler.get_last_lr()[0]:.2e}"
             f"{metric_str}"
         )
         monitor.log_epoch(epoch, {**train_log, **val_log})
