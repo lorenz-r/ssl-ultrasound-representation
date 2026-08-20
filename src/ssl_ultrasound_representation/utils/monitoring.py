@@ -104,6 +104,11 @@ class TrainingMonitor:
         self._vis_frames = frames
         self._vis_labels = labels
 
+    @property
+    def vis_frames(self) -> torch.Tensor | None:
+        """The frames fixed by `set_vis_frames` (None if never set)."""
+        return self._vis_frames
+
     def log_reconstructions(
         self, epoch: int, model: torch.nn.Module, pos_embed: torch.Tensor, device
     ) -> None:
@@ -115,6 +120,21 @@ class TrainingMonitor:
             x = self._vis_frames.to(device)
             pred, _, _ = model(x, pos_embed)
             recon = model.unpatchify(pred).cpu().numpy()
+        self.log_reconstruction_frames(epoch, recon)
+
+    def log_reconstruction_frames(self, epoch: int, recon: np.ndarray) -> None:
+        """Log the B-mode panels for an already-computed reconstruction.
+
+        Split out of `log_reconstructions` so a model with a different forward
+        signature (e.g. the dense conv autoencoder, which has no `pos_embed` and
+        no `unpatchify`) can reuse the beamformer and the fixed vis frames.
+
+        Args:
+            recon: (N, transducer, scanline, 2, sample), same order and
+                preprocessing as the frames passed to `set_vis_frames`.
+        """
+        if self.run is None or self._beamformer is None or self._vis_frames is None:
+            return
         gt = self._vis_frames.numpy()
 
         images = []
@@ -175,14 +195,30 @@ class TrainingMonitor:
             x = self._vis_frames.to(device)
             pred, _, _ = model(x, pos_embed)
             recon = model.unpatchify(pred).cpu().numpy()
-        gt = self._vis_frames.numpy()
+        self.log_physics_frames(epoch, recon)
 
+    def log_physics_frames(
+        self, epoch: int, recon: np.ndarray, prefix: str = "physics/val"
+    ) -> dict[str, float]:
+        """Physics metrics for an already-computed reconstruction; returns them.
+
+        The frame-in variant of `log_physics_metrics` (see
+        `log_reconstruction_frames`). The return value matters for the conv
+        autoencoder's training loop, which gates checkpoint selection on
+        `complex_corr_coeff`.
+        """
+        if self._vis_frames is None:
+            return {}
+        gt = self._vis_frames.numpy()
         n = gt.shape[0]
         sums: dict[str, float] = {}
         for i in range(n):
             for k, v in compute_all_metrics(gt[i], recon[i]).items():
                 sums[k] = sums.get(k, 0.0) + v
-        self.run.log({f"physics/val/{k}": v / n for k, v in sums.items()}, step=epoch)
+        out = {k: v / n for k, v in sums.items()}
+        if self.run is not None:
+            self.run.log({f"{prefix}/{k}": v for k, v in out.items()}, step=epoch)
+        return out
 
     # ── checkpoints ──────────────────────────────────────────────────────────
     def log_checkpoint(
