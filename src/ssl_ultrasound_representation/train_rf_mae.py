@@ -132,7 +132,7 @@ def train(config: dict | None = None) -> dict:
     # reduced over the masked positions and over the full signal (spec §4 asks
     # for both). Distinct from the `physics/*` metrics, which run on whole frames
     # every `vis_every` epochs.
-    metrics = tuple(config.get("metrics", ("complex_mse", "phase")))
+    metrics = tuple(config.get("metrics", ("mse", "envelope", "correlation")))
     unknown = [m for m in metrics if m not in RF_METRICS]
     if unknown:
         raise ValueError(f"unknown metric(s) {unknown}; valid: {list(RF_METRICS)}")
@@ -409,7 +409,9 @@ def main() -> None:
         choices=RF_METRICS,
         help="Extra reconstruction metrics logged every epoch (not optimised). "
         "Each is logged over the masked positions and over the full signal: "
-        "train/<name>_masked, val/<name>_all, etc. Default: complex_mse phase.",
+        "train/<name>_masked, val/<name>_all, etc. Names and formulas match "
+        "mae/model/loss.py, so they compare directly against train.py runs. "
+        "Default: mse envelope correlation.",
     )
     p.add_argument("--hf-repo", dest="hf_repo")
     p.add_argument(
