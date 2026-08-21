@@ -410,6 +410,17 @@ def main() -> None:
     p.add_argument("--l-max", type=int, dest="l_max")
     p.add_argument("--p-chan", type=float, dest="p_chan")
     p.add_argument("--mask-seed", type=int, dest="mask_seed")
+    p.add_argument("--grad-clip", type=float, dest="grad_clip")
+    p.add_argument(
+        "--per-column-masks",
+        action="store_true",
+        default=None,
+        help="Sample an independent fast-time run per lateral column instead of "
+        "one depth band spanning the whole aperture. Shared bands (the default) "
+        "leave a masked sample with no unmasked neighbour at its own depth, so "
+        "the task is pure axial extrapolation; per-column runs let the model "
+        "read across the aperture instead.",
+    )
     p.add_argument("--global-ctx", choices=["mamba", "attn", "se", "none"], dest="global_ctx")
     p.add_argument("--c0", type=int)
     p.add_argument("--w-cpx", type=float, dest="w_cpx")
@@ -454,6 +465,8 @@ def main() -> None:
         args["use_wandb"] = False
     if args.pop("no_preload", None):
         args["preload"] = False
+    if args.pop("per_column_masks", None):
+        args["share_lateral"] = False
     train({k: v for k, v in args.items() if v is not None})
 
 
