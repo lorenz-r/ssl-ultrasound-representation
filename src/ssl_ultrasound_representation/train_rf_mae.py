@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import math
 import os
+import warnings
 from pathlib import Path
 
 import torch
@@ -360,9 +361,20 @@ def train(config: dict | None = None) -> dict:
         if epoch == 1 or epoch % vis_every == 0 or epoch == epochs:
             vis = monitor.vis_frames
             if vis is not None:
-                recon = reconstruct_frames(model, val_masker, vis, lateral, device)
-                monitor.log_physics_frames(epoch, recon.numpy())
-                monitor.log_reconstruction_frames(epoch, recon.numpy())
+                # The monitor's contract is that logging degrades gracefully, but
+                # these two calls reach into PyMUST beamforming and matplotlib —
+                # a geometry mismatch or a missing font raises, and unguarded that
+                # takes down a training run hours in, at the first vis epoch.
+                # Warn and keep training instead.
+                try:
+                    recon = reconstruct_frames(model, val_masker, vis, lateral, device)
+                    monitor.log_physics_frames(epoch, recon.numpy())
+                    monitor.log_reconstruction_frames(epoch, recon.numpy())
+                except Exception as exc:
+                    warnings.warn(
+                        f"epoch {epoch}: physics/reconstruction logging failed "
+                        f"({type(exc).__name__}: {exc}); training continues."
+                    )
 
         # ── checkpoint on complex correlation, not on loss (spec §5) ───────
         if v_steps and val_corr > best_corr:
@@ -382,13 +394,21 @@ def train(config: dict | None = None) -> dict:
                     },
                     path,
                 )
-                monitor.log_checkpoint(
-                    path,
-                    name="rf_conv_mae",
-                    aliases=["best", f"epoch-{epoch}"],
-                    metadata={"epoch": epoch, "val_complex_corr_masked": val_corr},
-                    keep_last=1,
-                )
+                # torch.save above is real work and must fail loudly; uploading
+                # the artifact is monitoring and must not take training with it.
+                try:
+                    monitor.log_checkpoint(
+                        path,
+                        name="rf_conv_mae",
+                        aliases=["best", f"epoch-{epoch}"],
+                        metadata={"epoch": epoch, "val_complex_corr_masked": val_corr},
+                        keep_last=1,
+                    )
+                except Exception as exc:
+                    warnings.warn(
+                        f"epoch {epoch}: checkpoint upload failed "
+                        f"({type(exc).__name__}: {exc}); local checkpoint at {path}."
+                    )
 
     monitor.finish(summary={"best_val_complex_corr_masked": best_corr})
     print(f"Training complete. Best masked complex correlation: {best_corr:.4f}")

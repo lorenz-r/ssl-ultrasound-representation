@@ -59,15 +59,37 @@ class TrainingMonitor:
             # these up. setdefault keeps any explicit env override authoritative.
             os.environ.setdefault("WANDB_CACHE_DIR", DEFAULT_WANDB_CACHE_DIR)
             os.environ.setdefault("WANDB_DATA_DIR", DEFAULT_WANDB_DATA_DIR)
-            for var in ("WANDB_CACHE_DIR", "WANDB_DATA_DIR"):
-                Path(os.environ[var]).mkdir(parents=True, exist_ok=True)
             try:
+                # Inside the try: on a node with a read-only or full /tmp this
+                # mkdir is what fails, and a monitoring problem must never take
+                # the training run with it.
+                for var in ("WANDB_CACHE_DIR", "WANDB_DATA_DIR"):
+                    Path(os.environ[var]).mkdir(parents=True, exist_ok=True)
                 import wandb
 
                 self.run = wandb.init(project=project, name=run_name, config=config)
                 self._wandb = wandb
             except Exception as exc:  # offline cluster node, bad key, ...
                 warnings.warn(f"wandb disabled ({exc}); training continues unlogged.")
+
+        # Say plainly whether metrics are going anywhere. A `warnings.warn` above
+        # is emitted once and then buried under tqdm bars, so a run that logs
+        # nothing looks identical to one that logs fine until you open wandb and
+        # find it empty. This line is the difference between noticing at step 1
+        # and noticing after a multi-hour run.
+        if self.run is not None:
+            mode = getattr(getattr(self.run, "settings", None), "mode", "online")
+            url = getattr(self.run, "url", None)
+            print(f"wandb: {mode} | run '{self.run.name}' | {url or '(no url)'}", flush=True)
+        elif enabled:
+            print(
+                "wandb: FAILED to initialise (see warning above) — this run is "
+                "NOT being logged. Fix with `wandb login`, or set WANDB_API_KEY / "
+                "WANDB_MODE=offline.",
+                flush=True,
+            )
+        else:
+            print("wandb: disabled (--no-wandb) — this run is NOT being logged.", flush=True)
 
         self._beamformer: ZoneBeamformer | None = None
         if Path(beamform_params).exists():
@@ -259,7 +281,16 @@ class TrainingMonitor:
             # Must wait for the server to commit this version before we can list
             # and prune; otherwise the just-logged "best" could be missed or the
             # collection enumerated stale.
-            logged.wait()
+            try:
+                logged.wait()
+            except Exception as exc:  # noqa: BLE001 — never fail training on cleanup
+                # An offline run never commits server-side, so wait() raises
+                # ArtifactNotLoggedError and there is nothing to prune. Same
+                # intent as _prune_checkpoints below — the guard just started one
+                # line too late, which made every offline run die at its first
+                # checkpoint.
+                warnings.warn(f"checkpoint pruning skipped ({exc})")
+                return
             self._prune_checkpoints(name, keep_last)
 
     def _prune_checkpoints(self, name: str, keep_last: int) -> None:
