@@ -8,7 +8,7 @@ per-epoch history keys — and differs only where MAE genuinely differs:
 
 - **One view, not two.** MAE's pretext task is reconstruction under masking,
   so the loader hands over a single crop per sample rather than a view pair.
-  `scripts/wi14_train.py` feeds the *un-augmented* crop, which is what "same
+  `scripts/train/mae.py` feeds the *un-augmented* crop, which is what "same
   crops, same eval" in WI-14 means.
 - **RankMe reads `encode()`, not `forward()`.** `forward` masks 75 % of the
   tokens; the representation being compared against VICReg's backbone must see

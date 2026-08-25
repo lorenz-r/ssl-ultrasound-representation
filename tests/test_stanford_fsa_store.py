@@ -127,7 +127,7 @@ def test_refuses_metadata_that_does_not_cover_every_frame(store):
 def test_missing_manifest_names_the_builder(store):
     root, _ = store
     (root / "manifest.json").unlink()
-    with pytest.raises(FileNotFoundError, match="wi16_fetch_stanford_fsa"):
+    with pytest.raises(FileNotFoundError, match="fetch_stanford_fsa"):
         open_fsa_store(root)
 
 

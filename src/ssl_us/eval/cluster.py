@@ -51,6 +51,8 @@ def cluster_report(
         ref["cyst"] = labels["contains_cyst"][idx].astype(int)
     if "t0_group" in labels:
         ref["t0_group"] = labels["t0_group"][idx].astype(int)
+    if "session_id" in labels:  # WI-16's Stanford corpus has no tissue label
+        ref["session"] = labels["session_id"][idx].astype(int)
     if "z_centre" in labels:  # the confound, quantised — included deliberately
         z = labels["z_centre"][idx]
         ref["depth_quartile"] = np.digitize(z, np.quantile(z, [0.25, 0.5, 0.75]))

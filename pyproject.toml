@@ -21,6 +21,10 @@ dependencies = [
   # Install a CUDA build via: pip install torch --index-url https://download.pytorch.org/whl/cu124
   "torch (>=2.6)",
   "torchvision (>=0.21)",
+  # PLAN.md §4.4 baseline 5. Only `timm` redistributes the DINOv3 weights
+  # ungated (facebook/dinov3-* is `gated: manual` and the request has not
+  # cleared); without it that baseline silently falls back to DINOv2.
+  "timm (>=1.0)",
   "wandb (>=0.27.2,<0.28.0)",
   "scikit-learn (>=1.9.0,<2.0.0)",
   "scikit-image (>=0.24)",
@@ -51,8 +55,8 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.lint.per-file-ignores]
 # One-off measurement script (PLAN.md WI-0); deliberately dense so the
 # per-frame instrumentation reads as one block. Already run and its output
-# checked into tests/data/wi0_results.json — not touched for style.
-"scripts/wi0_probe.py" = ["E401", "E501", "E701", "E702", "E741", "I001"]
+# checked into results/gates/nvidia_frame_probe.json — not touched for style.
+"scripts/data/probe_nvidia_frames.py" = ["E401", "E501", "E701", "E702", "E741", "I001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

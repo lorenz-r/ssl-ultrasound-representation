@@ -116,6 +116,12 @@ class SectorStore:
             raise ValueError(
                 f"frame_ids has {len(frame_ids)} entries but spec.n_frames is {spec.n_frames}"
             )
+        if geometry is not None and geometry.sector_id.shape[:2] != (spec.nz, spec.nx):
+            raise ValueError(
+                f"geometry grid {geometry.sector_id.shape[:2]} != spec grid "
+                f"{(spec.nz, spec.nx)} — the store's z_mm/x_mm attrs would silently "
+                f"describe the wrong grid"
+            )
         path = Path(path)
         root = zarr.open_group(str(path), mode="w" if overwrite else "w-")
 
@@ -136,8 +142,15 @@ class SectorStore:
         }
         root.attrs["frame_ids"] = list(frame_ids)
         root.attrs["beamform_params"] = beamform_params
-        root.attrs["z_mm"] = geo.bmode_z_axis_mm().tolist()
-        root.attrs["x_mm"] = geo.bmode_x_axis_mm().tolist()
+        # Sourced from `geometry` when given — its z_mm/x_mm is the grid that
+        # actually produced `sector_id`/`occupancy` below, which is not always
+        # NVIDIA's own (507, 456) bmode grid (e.g. WI-16's Stanford variants).
+        # Falls back to that grid only for the geometry-less callers (existing
+        # tests that skip the 41.6 MB sector map).
+        z_mm = geometry.z_mm if geometry is not None else geo.bmode_z_axis_mm()
+        x_mm = geometry.x_mm if geometry is not None else geo.bmode_x_axis_mm()
+        root.attrs["z_mm"] = np.asarray(z_mm).tolist()
+        root.attrs["x_mm"] = np.asarray(x_mm).tolist()
         # Raw sums, not normalized — stated in the store itself so a consumer
         # that never reads PLAN.md still cannot miss it.
         root.attrs["normalized"] = False
@@ -193,6 +206,23 @@ class SectorStore:
     @property
     def beamform_params(self) -> dict:
         return dict(self.root.attrs["beamform_params"])
+
+    @property
+    def z_mm(self) -> np.ndarray:
+        """``(Z,)`` depth axis of the grid this store was actually beamformed on.
+
+        Read from attrs rather than reconstructed from
+        :mod:`ssl_us.data.geometry`: the NVIDIA bmode grid is only one of the
+        grids that produce a store (WI-16's two Stanford variants are others),
+        and a consumer that assumes the bmode axis mislabels every crop centre
+        on any other grid.
+        """
+        return np.asarray(self.root.attrs["z_mm"], dtype=np.float64)
+
+    @property
+    def x_mm(self) -> np.ndarray:
+        """``(X,)`` lateral axis of the grid this store was beamformed on."""
+        return np.asarray(self.root.attrs["x_mm"], dtype=np.float64)
 
     @property
     def occupancy(self) -> np.ndarray:

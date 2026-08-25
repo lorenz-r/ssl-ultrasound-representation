@@ -573,3 +573,55 @@ def make_dataloader(
         pin_memory=pin_memory,
         **({"prefetch_factor": prefetch_factor} if num_workers > 0 else {}),
     )
+
+
+class RawCropLoader:
+    """Re-iterable loader of single, un-augmented crops in the model's layout.
+
+    Reuses the WI-12 frame-shipping path — :class:`GpuFrameCache` cuts crops
+    device-side from resident frames — and stops short of
+    :meth:`GpuAugmentor.__call__`, which is the part that makes the two
+    augmented views. What is left is exactly `reduce_and_normalize` plus the
+    K-to-channel fold, i.e. the same tensor `eval/store_features.py` builds for
+    probing.
+
+    Re-iterable and length-aware for the same two reasons `AggregatedLoader` is
+    in `train/vicreg.py`: `iter_epoch` is a generator, so epoch 2 of a
+    multi-epoch run would otherwise train on nothing, and the LR schedule needs
+    `len()`.
+
+    Shared by the two arms that train on un-augmented crops — WI-14's MAE
+    (`scripts/train/mae.py`) and WI-17's I-JEPA (`scripts/train/ijepa.py`).
+    It lives here rather than in either script because scripts cannot import
+    one another (no package on `sys.path` when run as `python scripts/x.py`),
+    and a second copy is how the two arms come to train on subtly different
+    crops for a reason that is not the objective.
+    """
+
+    def __init__(
+        self, cfg: LoaderConfig, loader, n_frames: int, batch_size: int, device: str, seed: int
+    ):
+        self._cfg = cfg
+        self._loader = loader
+        self._batch_size = batch_size
+        self._len = (n_frames * cfg.crops_per_frame) // batch_size
+        # Borrowed only for its occupancy gather and frame cache; the
+        # augmentation entry point is deliberately never called.
+        self._aug = GpuAugmentor(cfg, device=device, seed=seed)
+        self._cache: GpuFrameCache | None = None
+
+    def __iter__(self):
+        import torch
+
+        if self._cache is None:
+            self._cache = GpuFrameCache(
+                SectorCropDataset(self._cfg), self._aug.device, self._aug.generator
+            )
+        for sums, z0, x0 in self._cache.iter_epoch(self._loader, self._batch_size):
+            occ = self._aug.occupancy_for(z0, x0)
+            v = tf.reduce_and_normalize_torch(sums, occ, target_k=self._cfg.k)
+            # (B, 2, Z, X, k) -> (B, 2k, Z, X), I-block then Q-block.
+            yield torch.movedim(v, -1, 2).flatten(1, 2).contiguous()
+
+    def __len__(self) -> int:
+        return self._len

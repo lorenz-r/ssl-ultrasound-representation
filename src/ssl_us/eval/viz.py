@@ -223,7 +223,7 @@ def plot_encoder_grid(
     against Policy A's +0.52, and that contrast is only visible side by side.
 
     The comparison is fair because **every encoder saw the identical crops** —
-    `wi13_matrix` samples origins once for the whole corpus and shares them, so
+    `nvidia_matrix` samples origins once for the whole corpus and shares them, so
     the only difference between two columns is the weights. Each row also gets a
     single shared colour scale and one colorbar, so a panel cannot look
     structured merely by having been given a tighter range than its neighbour.

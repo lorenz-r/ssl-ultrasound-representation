@@ -16,7 +16,7 @@ checked here are exact mathematical identities that must hold for *any* input:
 
 The real-frame reference-validation gate against NVIDIA's own `bmode` (NCC,
 median dB error, the negative control with phase rotation disabled) lives in
-``scripts/wi4_reference_validation.py`` — it needs a ~265 MB/frame download,
+``scripts/beamform/validate_nvidia_reconstruction.py`` — it needs a ~265 MB/frame download,
 so it is not a pytest test.
 """
 

@@ -103,6 +103,30 @@ def test_geometry_is_stored_once_and_matches_sectors_module(tmp_path):
     assert s.root.attrs["sector_geometry"]["f_number"] == 1.5
 
 
+def test_z_mm_x_mm_attrs_reflect_the_geometry_actually_used(tmp_path):
+    """A store built on a non-NVIDIA grid (e.g. WI-16's Stanford variants) must
+    not silently record NVIDIA's own (507, 456) bmode axes in its attrs."""
+    z_mm = np.linspace(0.0, 19.9, 9)
+    x_mm = np.linspace(-19.1, 19.1, 7)
+    g = sec.build_sector_geometry(k=16, f_number=1.5, z_mm=z_mm, x_mm=x_mm)
+    spec = StoreSpec(n_frames=1, nz=len(z_mm), nx=len(x_mm), k=16)
+    SectorStore.create(tmp_path / "g.zarr", spec, ["f0"], {}, geometry=g)
+
+    reopened = open_store(tmp_path / "g.zarr")
+    assert reopened.root.attrs["z_mm"] == pytest.approx(z_mm.tolist())
+    assert reopened.root.attrs["x_mm"] == pytest.approx(x_mm.tolist())
+
+
+def test_geometry_grid_mismatch_with_spec_is_rejected(tmp_path):
+    """A geometry built on one grid but declared under a different spec would
+    otherwise silently mislabel the store's z_mm/x_mm — catch it at creation."""
+    z_mm, x_mm = np.linspace(0.0, 19.9, 9), np.linspace(-19.1, 19.1, 7)
+    g = sec.build_sector_geometry(k=16, f_number=1.5, z_mm=z_mm, x_mm=x_mm)
+    wrong_spec = StoreSpec(n_frames=1, nz=len(z_mm) + 1, nx=len(x_mm), k=16)
+    with pytest.raises(ValueError, match="geometry grid"):
+        SectorStore.create(tmp_path / "bad.zarr", wrong_spec, ["f0"], {}, geometry=g)
+
+
 def test_stored_raw_sums_support_the_k_ladder(tmp_path):
     """The reason the store keeps raw sums: reducing K then normalizing must
     equal normalizing the merged sectors — which fails if the store had

@@ -6,8 +6,8 @@ mute, and the acquisition parameters together into one function from a streamed
 HuggingFace sample to a ``(2, Z, X, K)`` array ready for the store.
 
 **Every constant here was fixed by WI-4's validation, not chosen freshly.** The
-gate run (`scripts/wi4_reference_validation.py`, results in
-`tests/data/wi4_results.json`) swept them and these won:
+gate run (`scripts/beamform/validate_nvidia_reconstruction.py`, results in
+`results/gates/nvidia_reconstruction.json`) swept them and these won:
 
 - ``f_number = 1.5`` — best on 7 of 8 frames.
 - ``t_peak = 0`` — *not* zea's ``1/center_frequency`` default, which the

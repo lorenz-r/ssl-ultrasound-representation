@@ -1,7 +1,7 @@
 """Results-matrix driver — runnable on `bmode` with a random encoder, before any
 beamformer or trained model exists (PLAN.md 4.6).
 
-    python -m ssl_us.eval.matrix --data bmode_subset.npz --out figures/eval_boot
+    python -m ssl_us.eval.matrix --data bmode_subset.npz --out outputs/diagnostics/eval_boot
 
 This is the harness bootstrap: `bmode` is already a (507, 456) image on the same
 grid as `segmentation_map`, so crop sampling, label attachment, both guards, the
@@ -202,7 +202,7 @@ def _write_table(results: list[dict], path: Path) -> None:
 def _cli() -> dict:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data", required=True, help="npz from the bootstrap fetch")
-    p.add_argument("--out", default="figures/eval_boot")
+    p.add_argument("--out", default="outputs/diagnostics/eval_boot")
     p.add_argument("--stage", default="c0_const", choices=["c0_const", "gt_sos"])
     p.add_argument("--crop-size", type=int, default=128, dest="crop_size")
     p.add_argument("--z-min-mm", type=float, default=0.0, dest="z_min_mm")

@@ -4,7 +4,7 @@
 is why `eval/store_features.py` reports WI-13's crop-level anatomy targets as
 blocked. The maps those targets need — `segmentation_map` (507, 456) and
 `sound_speed_map` (32, 32) — are a 2.1 MB/frame slice of the source rows next to
-a 265 MB/frame IQ payload, so `scripts/wi13_fetch_label_maps.py` pulls them by
+a 265 MB/frame IQ payload, so `scripts/data/fetch_nvidia_label_maps.py` pulls them by
 column and writes them here as `.npy`. This module is the read side.
 
 Everything is memory-mapped and indexed by the store's own `"{split}/{index}"`
@@ -166,7 +166,7 @@ def open_label_maps(root: str | Path = DEFAULT_ROOT, columns=None) -> LabelMaps:
     manifest_path = root / "manifest.json"
     if not manifest_path.exists():
         raise FileNotFoundError(
-            f"no manifest at {manifest_path} — run scripts/wi13_fetch_label_maps.py first"
+            f"no manifest at {manifest_path} — run scripts/data/fetch_nvidia_label_maps.py first"
         )
     manifest = json.loads(manifest_path.read_text())
     scalars_blob = json.loads((root / "scalars.json").read_text())
@@ -181,7 +181,7 @@ def open_label_maps(root: str | Path = DEFAULT_ROOT, columns=None) -> LabelMaps:
     if "verification" not in manifest:
         raise ValueError(
             f"{root} has not been verified against the store's frame_metadata.json — "
-            f"re-run scripts/wi13_fetch_label_maps.py --verify-only"
+            f"re-run scripts/data/fetch_nvidia_label_maps.py --verify-only"
         )
 
     wanted = list(columns) if columns is not None else list(manifest["columns"])

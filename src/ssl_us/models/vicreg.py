@@ -91,10 +91,77 @@ def vicreg_loss(
     return total, {"invariance": inv, "variance": var, "covariance": cov}
 
 
+class ViTBackbone(nn.Module):
+    """ViT-S emitting one mean-pooled vector, so it drops into `VICReg`
+    wherever `ResNetBackbone` fits (WI-18, docs/MEMORY.md §16.7).
+
+    Why this exists: §16 measured I-JEPA against the VICReg arms and could not
+    separate the objective from the backbone, because the two moved together —
+    ViT-S with a latent-target objective against ResNet-18 with a
+    joint-embedding one. This fills the missing cell of that 2x2. Holding the
+    objective fixed and swapping only the backbone is the *only* comparison
+    that attributes §16.3's result to one or the other.
+
+    Pooling is a plain mean over patch tokens with no CLS, matching
+    `IJEPA.encode` and `MAE2D.encode` exactly — the three ViT arms must be
+    probed on the same kind of vector or the comparison acquires a second
+    difference. `ViTEncoder` is imported from `ijepa` because that is where the
+    generic ViT already lives; it is not I-JEPA-specific (`ijepa` itself
+    imports `PatchEmbed` from `mae2d` for the same reason).
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        img_size: int,
+        patch_size: int,
+        embed_dim: int = 384,
+        depth: int = 12,
+        heads: int = 6,
+        seed: int | None = None,
+    ):
+        super().__init__()
+        from .ijepa import ViTEncoder
+
+        if seed is not None:
+            torch.manual_seed(seed)
+        self.net = ViTEncoder(in_channels, img_size, patch_size, embed_dim, depth, heads)
+        self.dim = embed_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """``(B, C, H, W) -> (B, embed_dim)``."""
+        return self.net(x).mean(1)
+
+
+def build_backbone(
+    name: str, in_channels: int, crop_size: int, patch_size: int = 0, seed: int | None = None
+) -> nn.Module:
+    """Backbone by name, returning a module with a `.dim` attribute.
+
+    `patch_size` 0 means "derive from the crop", `crop_size // 16`, which is the
+    same rule `scripts/train/ijepa.py` applies — a 16x16 = 256-token grid at
+    every K. Keeping the token count fixed across arms is what stops sequence
+    length becoming a third difference in the comparison.
+    """
+    if name == "resnet18":
+        from .resnet import ResNetBackbone
+
+        return ResNetBackbone(in_channels, seed=seed)
+    if name == "vit_s":
+        return ViTBackbone(
+            in_channels, crop_size, patch_size or max(1, crop_size // 16), seed=seed
+        )
+    raise ValueError(f"unknown backbone {name!r} (expected 'resnet18' or 'vit_s')")
+
+
 class VICReg(nn.Module):
     """Backbone + projector, exposing both the 512-d backbone feature (what
     RankMe and the frozen-feature probes read, PLAN.md §4.7) and the
     projector output (what the loss and the per-dimension std histogram read).
+
+    `backbone_dim` is the backbone's output width, 512 for ResNet-18 and 384
+    for the ViT-S of `build_backbone("vit_s", ...)`; read it off the backbone's
+    `.dim` rather than assuming the ResNet constant.
     """
 
     def __init__(self, backbone: nn.Module, backbone_dim: int, projector_dim: int = 2048):

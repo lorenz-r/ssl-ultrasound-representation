@@ -4,7 +4,7 @@
 reconstruction against NVIDIA's shipped ``bmode`` with a pixel-wise
 normalised cross-correlation, gated at NCC >= 0.98. That gate is not
 reachable — not by us, and not by NVIDIA. Measured on the real corpus
-(``tests/data/wi4_reference_selfconsistency.json``): NVIDIA's *own* two
+(``results/gates/nvidia_reference_selfconsistency.json``): NVIDIA's *own* two
 shipped reconstructions of the *same frame*, ``bmode`` and ``bmode_focused``,
 score NCC ~0.19 against each other, while our reconstruction scores ~0.26
 against ``bmode`` — i.e. we already match the reference better than the

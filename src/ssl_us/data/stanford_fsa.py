@@ -1,6 +1,6 @@
 """Reader for the Stanford FSA transfer corpus (WI-16).
 
-Built by `scripts/wi16_fetch_stanford_fsa.py` from figshare 28291985. One array
+Built by `scripts/data/fetch_stanford_fsa.py` from figshare 28291985. One array
 of baseband IQ in NVIDIA's own `(n_tx, n_rx, n_ax)` layout, plus per-frame
 provenance — so the beamformer that turns NVIDIA rows into the K-sector store
 sees the same shape here, with different constants.
@@ -115,7 +115,7 @@ def open_fsa_store(path: str | Path = DEFAULT_PATH) -> StanfordFsaStore:
     manifest_path = path / "manifest.json"
     if not manifest_path.exists():
         raise FileNotFoundError(
-            f"no manifest at {manifest_path} — run scripts/wi16_fetch_stanford_fsa.py first"
+            f"no manifest at {manifest_path} — run scripts/data/fetch_stanford_fsa.py first"
         )
     manifest = json.loads(manifest_path.read_text())
     root = zarr.open_group(str(path), mode="r")

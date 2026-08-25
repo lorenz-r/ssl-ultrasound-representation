@@ -24,12 +24,12 @@ import pytest
 from ssl_us.data import geometry as geo
 from ssl_us.data.label_maps import CONTAINS_CYST_THRESHOLD, LabelMaps, open_label_maps
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "wi13_fetch_label_maps.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "data" / "fetch_nvidia_label_maps.py"
 
 
 def _load_script():
-    """Import scripts/wi13_fetch_label_maps.py by path — `scripts` is not a package."""
-    spec = importlib.util.spec_from_file_location("wi13_fetch_label_maps", SCRIPT)
+    """Import scripts/data/fetch_nvidia_label_maps.py by path — `scripts` is not a package."""
+    spec = importlib.util.spec_from_file_location("fetch_nvidia_label_maps", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -187,7 +187,7 @@ def test_crop_labels_reject_a_crop_that_runs_off_the_frame(fetched):
         maps.crop_labels(["train/0"], np.array([[geo.BMODE_NZ - 10, 0]]), 64)
 
 
-def test_to_bootstrap_has_the_shape_the_wi2_harness_expects(fetched):
+def test_to_bootstrap_has_the_shape_the_probe_harness_expects(fetched):
     root, _, sos = fetched
     maps = open_label_maps(root)
     d = maps.to_bootstrap(["train/2", "train/0"])

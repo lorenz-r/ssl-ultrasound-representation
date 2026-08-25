@@ -1,6 +1,4 @@
 /data/
-figures/
-scripts/matlab_scripts
 __pycache__/
 *.pyc
 CLAUDE.md
@@ -11,6 +9,13 @@ artifacts/
 .env
 .venv-zea/
 
-# Beamformed K-sector stores (WI-8) — 24 GB, rebuilt by scripts/wi8_build.py
+# Beamformed K-sector stores — 24 GB, rebuilt by scripts/beamform/build_nvidia_store.py
 *.zarr/
 *.zarr.build/
+
+# Run logs from unattended cluster jobs — regenerated per run
+logs/
+
+# Generated run outputs: figures, per-run results.json/md, embeddings.
+# The *canonical* committed numbers live in results/ and ARE tracked.
+outputs/
