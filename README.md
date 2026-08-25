@@ -159,6 +159,22 @@ internally pads the `180 x 180` grid to a valid power-of-two multiple and crops
 the output back to the original geometry. Its output is one complex channel
 containing the reconstructed IQ response.
 
+The full-depth representation experiments use
+`scripts/train_nv_projected_complex_unet.py` instead. For every TX/RX pair, a
+shared complex linear layer projects the complete 256-sample fast-time trace
+into 64 learned coefficients. Each coefficient map is completed by the same
+spatial Complex U-Net, and a learned inverse complex projection restores the
+256-sample IQ trace. The deepest spatial features can be pooled with
+`ProjectedComplexUNet2d.sample_embedding()` to obtain one phase-aware vector per
+acquisition. This design lets the learned coefficients represent the complete
+fast-time signal instead of treating physical depth samples as unrelated
+training examples.
+
+The projected trainer defines `--masking-mode rx_tube` as complete receiver
+masking: selecting one RX hides every TX response and all 256 depth samples for
+that receiver. This differs from the legacy `receive_tube` mode above, which
+selects different TX/depth traces independently inside each receiver.
+
 #### Beamform a trained checkpoint
 
 Generate a full-aperture comparison for publisher validation frame 830:

@@ -134,7 +134,9 @@ def main() -> None:
             sorted(read_indices(fixed_mask_path)), dtype=torch.long
         )
         mask_count = len(fixed_mask)
-        disjoint_mask = build_disjoint_mask(fixed_mask, 180)
+        disjoint_mask = (
+            build_disjoint_mask(fixed_mask, 180) if 2 * mask_count <= 180 else None
+        )
         random_masks = make_masks(
             args.random_mask_count,
             mask_count,
@@ -150,14 +152,20 @@ def main() -> None:
         fixed_mask = make_receive_tube_masks(
             1, mask_count, seed=args.mask_seed, width=180
         )[0]
-        disjoint_mask = build_disjoint_spatial_mask(fixed_mask)
+        disjoint_mask = (
+            build_disjoint_spatial_mask(fixed_mask)
+            if 2 * mask_count <= 180
+            else None
+        )
         random_masks = make_receive_tube_masks(
             args.random_mask_count,
             mask_count,
             seed=args.random_mask_seed,
             width=180,
         )
-    masks = {fixed_label: fixed_mask, "disjoint": disjoint_mask}
+    masks = {fixed_label: fixed_mask}
+    if disjoint_mask is not None:
+        masks["disjoint"] = disjoint_mask
     for index, mask in enumerate(random_masks):
         masks[f"random_{index:02d}"] = mask
 
