@@ -46,6 +46,16 @@ CKPT_TEMPLATES = (
 # the only thing it ever corrupted is the not-run bookkeeping.
 LEGACY_TEMPLATE_K = 4
 
+# The single-run arms, whose directory names carry no policy. Named here rather
+# than inlined at their use sites because WI-19's segmentation probe builds the
+# *same* set of encoders through a pre-pool path (`eval/dense_features.py`), and
+# two copies of a checkpoint path is how one table comes to include an arm the
+# other silently skipped. `docs/work-item-map.md` records why these keep their
+# WI names: they are directories on the cluster filesystem.
+VIT_TEMPLATE = "wi18_vicreg_vit_k{k}_policyA"
+IJEPA_TEMPLATE = "wi17_ijepa_k{k}"
+MAE_TEMPLATES = (("wi14_mae_k{k}", "mae_norm"), ("wi14_mae_k{k}_rawtarget", "mae_raw"))
+
 
 def find_checkpoint(root: str | Path, k: int, policy: str) -> Path | None:
     for template in CKPT_TEMPLATES:
@@ -80,7 +90,7 @@ def build_encoders(args, in_channels: int, tag: str = "nvidia") -> dict:
     # backbone, so `vicreg_A` -> `vicreg_vit_A` isolates architecture and
     # `vicreg_vit_A` -> `ijepa` isolates the objective. Registered only when
     # trained, so every existing column is unchanged until it is.
-    vit_ckpt = Path(args.checkpoint_root) / f"wi18_vicreg_vit_k{args.k}_policyA" / "last.pt"
+    vit_ckpt = Path(args.checkpoint_root) / VIT_TEMPLATE.format(k=args.k) / "last.pt"
     if vit_ckpt.exists():
         print(f"[{tag}] vicreg_vit_A: {vit_ckpt}")
         encoders["vicreg_vit_A"] = VICRegCheckpointEncoder(
@@ -95,9 +105,8 @@ def build_encoders(args, in_channels: int, tag: str = "nvidia") -> dict:
     # axial, against 0.000 for the normalised within-patch pattern). The
     # normalised arm therefore trains on pure noise, and the raw arm is the
     # fair MAE baseline for this data even though it is not the paper default.
-    for suffix, name in ((f"wi14_mae_k{args.k}", "mae_norm"),
-                         (f"wi14_mae_k{args.k}_rawtarget", "mae_raw")):
-        mae_ckpt = Path(args.checkpoint_root) / suffix / "last.pt"
+    for template, name in MAE_TEMPLATES:
+        mae_ckpt = Path(args.checkpoint_root) / template.format(k=args.k) / "last.pt"
         if mae_ckpt.exists():
             print(f"[{tag}] {name}: {mae_ckpt}")
             encoders[name] = MAECheckpointEncoder(
@@ -114,7 +123,7 @@ def build_encoders(args, in_channels: int, tag: str = "nvidia") -> dict:
     # identical crops, never trained. `random_resnet18` cannot serve that role
     # for a transformer arm, and it is registered only when the trained arm is
     # present so existing matrix columns are unchanged until WI-17 is run.
-    ijepa_ckpt = Path(args.checkpoint_root) / f"wi17_ijepa_k{args.k}" / "last.pt"
+    ijepa_ckpt = Path(args.checkpoint_root) / IJEPA_TEMPLATE.format(k=args.k) / "last.pt"
     if ijepa_ckpt.exists():
         print(f"[{tag}] ijepa: {ijepa_ckpt}")
         encoders["ijepa"] = IJEPACheckpointEncoder(

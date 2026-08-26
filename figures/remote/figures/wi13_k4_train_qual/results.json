@@ -1,0 +1,411 @@
+{
+ "wi": 13,
+ "kind": "qualitative",
+ "k": 4,
+ "split": "train",
+ "crop_size": 128,
+ "crops_per_frame": 8,
+ "n_crops": 6640,
+ "n_plotted": 4000,
+ "encoders": [
+  "vicreg_A",
+  "vicreg_B",
+  "mae_norm",
+  "mae_raw",
+  "random_resnet18",
+  "pca_raw",
+  "trivial"
+ ],
+ "grid_encoders": [
+  "vicreg_A",
+  "vicreg_B",
+  "mae_raw",
+  "random_resnet18"
+ ],
+ "colour_keys": [
+  "z_centre",
+  "x_centre",
+  "sos_mean_frame",
+  "cyst_fraction"
+ ],
+ "projections": [
+  "pca",
+  "tsne",
+  "umap"
+ ],
+ "probe_results": "figures/wi13_k4_train_anatomy/results.json",
+ "clusters": {
+  "vicreg_A": {
+   "n_points": 4000,
+   "kmeans": {
+    "k=2": {
+     "silhouette": 0.045262180268764496,
+     "ari_cyst": 0.10770292141489776,
+     "nmi_cyst": 0.10337627037362095,
+     "ari_t0_group": 0.003842054785755459,
+     "nmi_t0_group": 0.0032992986519782288,
+     "ari_depth_quartile": 0.02973422266633344,
+     "nmi_depth_quartile": 0.029388072144406235
+    },
+    "k=4": {
+     "silhouette": 0.030690820887684822,
+     "ari_cyst": 0.08011311296859759,
+     "nmi_cyst": 0.15113454646051472,
+     "ari_t0_group": -0.001545029740694924,
+     "nmi_t0_group": 0.004317972822289462,
+     "ari_depth_quartile": 0.12360960432459264,
+     "nmi_depth_quartile": 0.2006611533458717
+    },
+    "k=8": {
+     "silhouette": -0.014989709481596947,
+     "ari_cyst": 0.1311645096297058,
+     "nmi_cyst": 0.2308560129084495,
+     "ari_t0_group": 0.005941725099146624,
+     "nmi_t0_group": 0.010503056648771242,
+     "ari_depth_quartile": 0.12058188735592468,
+     "nmi_depth_quartile": 0.19350913533521574
+    },
+    "k=16": {
+     "silhouette": 0.0033806366845965385,
+     "ari_cyst": 0.0811584579474993,
+     "nmi_cyst": 0.22371062687236695,
+     "ari_t0_group": 0.003810577188661307,
+     "nmi_t0_group": 0.01258067489097243,
+     "ari_depth_quartile": 0.07812453782877009,
+     "nmi_depth_quartile": 0.2127063677639968
+    }
+   },
+   "dbscan": {
+    "eps": 10.2659,
+    "n_clusters": 7,
+    "noise_fraction": 0.9135,
+    "ari_cyst": -0.06295746806877671,
+    "nmi_cyst": 0.04863667402448158,
+    "ari_t0_group": -0.001234153031524861,
+    "nmi_t0_group": 0.01099173147944492,
+    "ari_depth_quartile": 0.004216243690940279,
+    "nmi_depth_quartile": 0.04800858893885258
+   }
+  },
+  "vicreg_B": {
+   "n_points": 4000,
+   "kmeans": {
+    "k=2": {
+     "silhouette": 0.018697045743465424,
+     "ari_cyst": 0.008165563523311442,
+     "nmi_cyst": 0.061083908167215546,
+     "ari_t0_group": 0.01553265823342006,
+     "nmi_t0_group": 0.00669682585909148,
+     "ari_depth_quartile": 0.007897420105367044,
+     "nmi_depth_quartile": 0.008978877121649378
+    },
+    "k=4": {
+     "silhouette": 0.02234875038266182,
+     "ari_cyst": 0.022177465804836902,
+     "nmi_cyst": 0.11962738963863241,
+     "ari_t0_group": 0.021766434165687753,
+     "nmi_t0_group": 0.012113318092702597,
+     "ari_depth_quartile": 0.042732480600377605,
+     "nmi_depth_quartile": 0.09514100845165198
+    },
+    "k=8": {
+     "silhouette": 0.0530594065785408,
+     "ari_cyst": 0.14736439530006706,
+     "nmi_cyst": 0.2453733988558274,
+     "ari_t0_group": 0.014613256910051216,
+     "nmi_t0_group": 0.022563339775775747,
+     "ari_depth_quartile": 0.07598708308927511,
+     "nmi_depth_quartile": 0.18793753753445303
+    },
+    "k=16": {
+     "silhouette": 0.08015072345733643,
+     "ari_cyst": 0.056203084399349006,
+     "nmi_cyst": 0.17226073946672538,
+     "ari_t0_group": 0.00762960047789105,
+     "nmi_t0_group": 0.02119413527244917,
+     "ari_depth_quartile": 0.08396098047577573,
+     "nmi_depth_quartile": 0.2287111491817118
+    }
+   },
+   "dbscan": {
+    "eps": 11.2763,
+    "n_clusters": 7,
+    "noise_fraction": 0.97475,
+    "ari_cyst": -0.023525823315940924,
+    "nmi_cyst": 0.019066000462433452,
+    "ari_t0_group": 6.50553838278026e-05,
+    "nmi_t0_group": 0.00523240779085958,
+    "ari_depth_quartile": 0.000346179556855283,
+    "nmi_depth_quartile": 0.03712784752377044
+   }
+  },
+  "mae_norm": {
+   "n_points": 4000,
+   "kmeans": {
+    "k=2": {
+     "silhouette": 0.06522799283266068,
+     "ari_cyst": -0.0002797331513902215,
+     "nmi_cyst": 1.1344343595955431e-05,
+     "ari_t0_group": 0.0020818710427011875,
+     "nmi_t0_group": 0.006254595075618631,
+     "ari_depth_quartile": 0.06297308289010518,
+     "nmi_depth_quartile": 0.06332336021834561
+    },
+    "k=4": {
+     "silhouette": 0.04575083777308464,
+     "ari_cyst": 0.002360950479099948,
+     "nmi_cyst": 0.002003206112364239,
+     "ari_t0_group": -0.011165476340091211,
+     "nmi_t0_group": 0.0044955577880465,
+     "ari_depth_quartile": 0.04550922725740981,
+     "nmi_depth_quartile": 0.04446227409508498
+    },
+    "k=8": {
+     "silhouette": 0.025751078501343727,
+     "ari_cyst": 0.00932895255312925,
+     "nmi_cyst": 0.015307160367304016,
+     "ari_t0_group": 0.0011997221200487293,
+     "nmi_t0_group": 0.008182529124416112,
+     "ari_depth_quartile": 0.028704827726911387,
+     "nmi_depth_quartile": 0.044733108834596164
+    },
+    "k=16": {
+     "silhouette": 0.021595587953925133,
+     "ari_cyst": 0.0032257687676821648,
+     "nmi_cyst": 0.011890572903662813,
+     "ari_t0_group": -9.388558222222228e-05,
+     "nmi_t0_group": 0.007263573027800182,
+     "ari_depth_quartile": 0.020863696919276236,
+     "nmi_depth_quartile": 0.04926372953398722
+    }
+   },
+   "dbscan": {
+    "eps": 18.7113,
+    "n_clusters": 1,
+    "noise_fraction": 0.74,
+    "ari_cyst": -0.010169819379611242,
+    "nmi_cyst": 0.001057316133867786,
+    "ari_t0_group": -0.012417485492083323,
+    "nmi_t0_group": 0.0056004612245422235,
+    "ari_depth_quartile": 0.02440481407438406,
+    "nmi_depth_quartile": 0.03837794676324045
+   }
+  },
+  "mae_raw": {
+   "n_points": 4000,
+   "kmeans": {
+    "k=2": {
+     "silhouette": 0.04284106194972992,
+     "ari_cyst": -0.00863901355295758,
+     "nmi_cyst": 0.010173784433897675,
+     "ari_t0_group": 0.008598315046129358,
+     "nmi_t0_group": 0.0029983798489430563,
+     "ari_depth_quartile": 0.09683948785755633,
+     "nmi_depth_quartile": 0.10755698174488139
+    },
+    "k=4": {
+     "silhouette": 0.04085049405694008,
+     "ari_cyst": 0.06443746005986187,
+     "nmi_cyst": 0.07888448963410402,
+     "ari_t0_group": -0.002798493931443014,
+     "nmi_t0_group": 0.00636881318778292,
+     "ari_depth_quartile": 0.09330347961499905,
+     "nmi_depth_quartile": 0.09322003263434256
+    },
+    "k=8": {
+     "silhouette": 0.01617642119526863,
+     "ari_cyst": 0.03217823406597451,
+     "nmi_cyst": 0.05138496885251999,
+     "ari_t0_group": -0.0016695396008927904,
+     "nmi_t0_group": 0.005911233690533595,
+     "ari_depth_quartile": 0.07180933152343005,
+     "nmi_depth_quartile": 0.07932458636150634
+    },
+    "k=16": {
+     "silhouette": -0.001342633506283164,
+     "ari_cyst": 0.01971291104476208,
+     "nmi_cyst": 0.04554325975907784,
+     "ari_t0_group": -0.0006780868486264645,
+     "nmi_t0_group": 0.006521553971988501,
+     "ari_depth_quartile": 0.057981080473267034,
+     "nmi_depth_quartile": 0.08146670975947264
+    }
+   },
+   "dbscan": {
+    "eps": 14.8677,
+    "n_clusters": 1,
+    "noise_fraction": 0.8005,
+    "ari_cyst": -0.03625723912092732,
+    "nmi_cyst": 0.01543617540583665,
+    "ari_t0_group": 0.011201091406573074,
+    "nmi_t0_group": 0.002161984768831537,
+    "ari_depth_quartile": 0.051494194449642865,
+    "nmi_depth_quartile": 0.10520592153309523
+   }
+  },
+  "random_resnet18": {
+   "n_points": 4000,
+   "kmeans": {
+    "k=2": {
+     "silhouette": 0.43148258328437805,
+     "ari_cyst": 0.006826551797730284,
+     "nmi_cyst": 0.001070689009949926,
+     "ari_t0_group": -0.0006420920576019169,
+     "nmi_t0_group": 0.009681839559603795,
+     "ari_depth_quartile": 0.10884861753070897,
+     "nmi_depth_quartile": 0.12922719404230848
+    },
+    "k=4": {
+     "silhouette": 0.3098472058773041,
+     "ari_cyst": 0.013205146167606817,
+     "nmi_cyst": 0.02250035563207309,
+     "ari_t0_group": 0.00924418881496915,
+     "nmi_t0_group": 0.017686570212079984,
+     "ari_depth_quartile": 0.18245174354924118,
+     "nmi_depth_quartile": 0.2105195390436673
+    },
+    "k=8": {
+     "silhouette": 0.20252935588359833,
+     "ari_cyst": 0.015233517499498087,
+     "nmi_cyst": 0.03671568605555756,
+     "ari_t0_group": 0.012210181133051574,
+     "nmi_t0_group": 0.02883605465859833,
+     "ari_depth_quartile": 0.14326658037014134,
+     "nmi_depth_quartile": 0.20631121222791268
+    },
+    "k=16": {
+     "silhouette": 0.1286165416240692,
+     "ari_cyst": 0.02147609783820383,
+     "nmi_cyst": 0.05552648211070104,
+     "ari_t0_group": 0.012467786211118964,
+     "nmi_t0_group": 0.033096533305956743,
+     "ari_depth_quartile": 0.11526018606445013,
+     "nmi_depth_quartile": 0.21039922429537886
+    }
+   },
+   "dbscan": {
+    "eps": 3.7372,
+    "n_clusters": 1,
+    "noise_fraction": 0.996,
+    "ari_cyst": -0.0034735469740693977,
+    "nmi_cyst": 0.002320708062997096,
+    "ari_t0_group": -0.0011945045417091748,
+    "nmi_t0_group": 0.0012448001917709933,
+    "ari_depth_quartile": 6.901747938493257e-06,
+    "nmi_depth_quartile": 0.007829784049731461
+   }
+  },
+  "pca_raw": {
+   "n_points": 4000,
+   "kmeans": {
+    "k=2": {
+     "silhouette": 0.7488743662834167,
+     "ari_cyst": 0.0012950257190690508,
+     "nmi_cyst": 0.0007140141223561301,
+     "ari_t0_group": -0.0004582703962167514,
+     "nmi_t0_group": 0.0007402202256733894,
+     "ari_depth_quartile": 1.7282582285652854e-06,
+     "nmi_depth_quartile": 0.0005961615136271378
+    },
+    "k=4": {
+     "silhouette": 0.6584898829460144,
+     "ari_cyst": 0.02914390383024072,
+     "nmi_cyst": 0.00962957748783638,
+     "ari_t0_group": -0.009181512539025022,
+     "nmi_t0_group": 0.017129036090870627,
+     "ari_depth_quartile": 0.0020530582806389825,
+     "nmi_depth_quartile": 0.019778628636082842
+    },
+    "k=8": {
+     "silhouette": 0.6450601816177368,
+     "ari_cyst": 0.022163831407823145,
+     "nmi_cyst": 0.01523878243427399,
+     "ari_t0_group": -0.005214303595604217,
+     "nmi_t0_group": 0.014641184821342659,
+     "ari_depth_quartile": 0.0014168425376064738,
+     "nmi_depth_quartile": 0.02029771511351399
+    },
+    "k=16": {
+     "silhouette": 0.6274667382240295,
+     "ari_cyst": 0.029756611623144816,
+     "nmi_cyst": 0.015972514213444203,
+     "ari_t0_group": -0.010325032740439931,
+     "nmi_t0_group": 0.032378487676266166,
+     "ari_depth_quartile": 0.007075496825541965,
+     "nmi_depth_quartile": 0.048509451495394394
+    }
+   },
+   "dbscan": {
+    "eps": 0.4558,
+    "n_clusters": 1,
+    "noise_fraction": 0.997,
+    "ari_cyst": 0.002030738546197751,
+    "nmi_cyst": 0.0007409396824709793,
+    "ari_t0_group": -0.00010956517455850757,
+    "nmi_t0_group": 0.0003849141243099604,
+    "ari_depth_quartile": -6.881670413868231e-06,
+    "nmi_depth_quartile": 0.00588955735073518
+   }
+  },
+  "trivial": {
+   "n_points": 4000,
+   "kmeans": {
+    "k=2": {
+     "silhouette": 0.5250157713890076,
+     "ari_cyst": -0.002572781499652394,
+     "nmi_cyst": 0.0004941574283143422,
+     "ari_t0_group": -0.00023989159143699776,
+     "nmi_t0_group": 0.004405675205710262,
+     "ari_depth_quartile": 0.14340419459668813,
+     "nmi_depth_quartile": 0.16652730987146266
+    },
+    "k=4": {
+     "silhouette": 0.4750552475452423,
+     "ari_cyst": 0.01921854729196315,
+     "nmi_cyst": 0.032549989951762566,
+     "ari_t0_group": 0.002686520070898534,
+     "nmi_t0_group": 0.01273052911242465,
+     "ari_depth_quartile": 0.1933476398035773,
+     "nmi_depth_quartile": 0.231924368262526
+    },
+    "k=8": {
+     "silhouette": 0.45198890566825867,
+     "ari_cyst": 0.03381087691897165,
+     "nmi_cyst": 0.06606470251559296,
+     "ari_t0_group": 0.013581667613444754,
+     "nmi_t0_group": 0.02982048461788608,
+     "ari_depth_quartile": 0.15761986603620126,
+     "nmi_depth_quartile": 0.22912920214973592
+    },
+    "k=16": {
+     "silhouette": 0.4144955575466156,
+     "ari_cyst": 0.03622481148839872,
+     "nmi_cyst": 0.09168323417065158,
+     "ari_t0_group": 0.01037284388768788,
+     "nmi_t0_group": 0.03530970372696036,
+     "ari_depth_quartile": 0.1045276103479167,
+     "nmi_depth_quartile": 0.21478379777010714
+    }
+   },
+   "dbscan": {
+    "eps": 0.0101,
+    "n_clusters": 0,
+    "noise_fraction": 1.0,
+    "ari_cyst": 0.0,
+    "nmi_cyst": 0.0,
+    "ari_t0_group": 0.0,
+    "nmi_t0_group": 0.0,
+    "ari_depth_quartile": 0.0,
+    "nmi_depth_quartile": 0.0
+   }
+  }
+ },
+ "figures": [
+  "figures/wi13_k4_train_qual/grid_pca.png",
+  "figures/wi13_k4_train_qual/grid_tsne.png",
+  "figures/wi13_k4_train_qual/grid_umap.png",
+  "figures/wi13_k4_train_qual/grid_pca_residual.png",
+  "figures/wi13_k4_train_qual/grid_tsne_residual.png",
+  "figures/wi13_k4_train_qual/grid_umap_residual.png"
+ ]
+}

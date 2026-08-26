@@ -160,6 +160,18 @@ class MAE2D(nn.Module):
         `ResNetBackbone.dim` so probes can treat the two arms alike."""
         return self.patch_embed.proj.out_features
 
+    def encode_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        """``(B, N, embed_dim)`` — per-patch, unmasked, **before** pooling.
+
+        `encode` is this followed by a mean. Split out for WI-19's segmentation
+        probe, which needs the spatial grid `encode` throws away, and kept as
+        the single tokenization path so the dense and pooled readings of this
+        checkpoint cannot drift: a second copy of the ``patch_embed + pos_embed``
+        line is exactly how they would.
+        """
+        tokens = self.patch_embed(x) + self.pos_embed
+        return self.encoder(tokens)
+
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """``(B, embed_dim)`` representation for probing — **no masking**.
 
@@ -170,8 +182,7 @@ class MAE2D(nn.Module):
         mean-pooled because this MAE has no CLS token; that is the standard
         alternative and is what `dim` reports the width of.
         """
-        tokens = self.patch_embed(x) + self.pos_embed
-        return self.encoder(tokens).mean(dim=1)
+        return self.encode_tokens(x).mean(dim=1)
 
     def forward(self, x: torch.Tensor, generator: torch.Generator | None = None):
         """Returns ``(pred, target, mask)`` — ``pred``/``target`` are

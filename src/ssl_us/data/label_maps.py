@@ -116,6 +116,28 @@ class LabelMaps:
             "sos_std": sos_std,
         }
 
+    def crop_masks(self, frame_ids, origins: np.ndarray, size: int) -> np.ndarray:
+        """The per-pixel masks `crop_labels` reduces to scalars — `(n, size, size)` uint8.
+
+        Same slicing, same `origins` contract, same bounds check; the only
+        difference is that nothing is averaged away. `crop_labels` answers
+        "how much cyst is in this crop", which is what the `contains_cyst` and
+        `cyst_fraction_crop` matrix cells probe; this answers *where*, which is
+        what WI-19's segmentation probe needs as its target.
+        """
+        origins = np.asarray(origins, dtype=np.int64)
+        frame_ids = list(frame_ids)
+        if len(origins) != len(frame_ids):
+            raise ValueError(f"{len(origins)} origins for {len(frame_ids)} frame ids")
+        out = np.empty((len(origins), size, size), dtype=np.uint8)
+        for i, (fid, (top, left)) in enumerate(zip(frame_ids, origins, strict=True)):
+            j = self._index[fid]
+            seg_c = self.seg[j, top : top + size, left : left + size]
+            if seg_c.shape != (size, size):
+                raise ValueError(f"crop at {(int(top), int(left))} runs off frame {fid}")
+            out[i] = seg_c
+        return out
+
     def to_bootstrap(self, frame_ids=None) -> dict:
         """The dict shape `eval/matrix.load_bootstrap` produces, over real frames.
 

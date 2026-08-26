@@ -19,3 +19,7 @@ logs/
 # Generated run outputs: figures, per-run results.json/md, embeddings.
 # The *canonical* committed numbers live in results/ and ARE tracked.
 outputs/
+
+# Cached raw embedding dumps under figures/ — large (100s of MB), regenerated
+# by the eval scripts. The plots derived from them (PNGs, results.json) stay tracked.
+figures/**/latents.npz

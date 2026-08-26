@@ -343,6 +343,18 @@ class IJEPA(nn.Module):
             target.copy_(online)
 
     @torch.no_grad()
+    def encode_tokens(self, x: torch.Tensor, encoder: str = "target") -> torch.Tensor:
+        """``(B, C, H, W) -> (B, N, dim)`` — unmasked patch tokens, before pooling.
+
+        `encode` is this followed by a mean. Split out for WI-19's segmentation
+        probe, which reads the token grid `encode` collapses; keeping one
+        implementation means the dense and pooled readings can never disagree
+        about *which* encoder (target vs context) they came from.
+        """
+        net = self.target_encoder if encoder == "target" else self.context_encoder
+        return net(x)
+
+    @torch.no_grad()
     def encode(self, x: torch.Tensor, encoder: str = "target") -> torch.Tensor:
         """``(B, C, H, W) -> (B, dim)`` — the probe-facing representation.
 
@@ -351,8 +363,7 @@ class IJEPA(nn.Module):
         gives the online one, which is what the loss actually optimises and is
         worth logging alongside when diagnosing a divergence between them.
         """
-        net = self.target_encoder if encoder == "target" else self.context_encoder
-        return net(x).mean(dim=1)
+        return self.encode_tokens(x, encoder=encoder).mean(dim=1)
 
     def forward(
         self, x: torch.Tensor, generator: torch.Generator | None = None

@@ -35,6 +35,7 @@ or a MEMORY.md section names a WI number or an old path.
 | WI-16 | Stanford FSA transfer corpus + transfer table | `scripts/data/fetch_stanford_fsa.py`, `scripts/beamform/build_stanford_store.py`, `scripts/eval/stanford_*.py`, `scripts/eval/rankme.py` |
 | WI-17 | I-JEPA arm | `scripts/train/ijepa.py`, `src/ssl_us/{models,train}/ijepa.py` |
 | WI-18 | VICReg on a ViT-S backbone | `scripts/cluster/train_vicreg_vit.sh` (runs `scripts/train/vicreg.py --backbone vit_s`) |
+| WI-19 | Per-pixel segmentation probe + mask figure | `scripts/eval/nvidia_segmentation.py`, `src/ssl_us/eval/dense_{features,probe}.py`, `docs/cluster-segmentation-probe.md` |
 
 ---
 
