@@ -189,8 +189,18 @@ def load_local_dataset(
     *,
     array_name: str = DEFAULT_ARRAY_NAME,
 ) -> tuple[zarr.Array, dict]:
-    """Open a zarr.zip + metadata.json already on disk (no HF round-trip)."""
-    arr = _open_zarr_array(zip_path, array_name=array_name)
+    """Open a local zarr store + metadata.json (no HF round-trip).
+
+    Accepts either form the build scripts produce: a `.zarr.zip` (the MultiFocal
+    rat builder) or an unzipped `.zarr` directory tree (the NV-Raw2Insights
+    builder, which writes a DirectoryStore straight to the node's local SSD).
+    The store type is detected from the path rather than the suffix.
+    """
+    path = Path(zip_path)
+    if path.is_dir():
+        arr = _open_zarr_dir_array(path, array_name=array_name)
+    else:
+        arr = _open_zarr_array(path, array_name=array_name)
     metadata = json.loads(Path(metadata_path).read_text())
     return arr, metadata
 

@@ -34,8 +34,14 @@ class ZoneBeamformer:
         nz: int = 256,
         strip_halfwidth_m: float = 1.5e-3,
         fnumber: float = 1.5,
+        tx_step: int | None = None,
     ):
         p = json.loads(Path(params_path).read_text())
+        self.acquisition_type = p.get("acquisition_type", "multifocal")
+        self.beamforming_mode = p.get("beamforming_mode", "strip_compound")
+        self.tx_step = max(
+            int(tx_step if tx_step is not None else p.get("default_tx_step", 1)), 1
+        )
         self.focal_zone = focal_zone
         self.n_elem = p["n_elements"]
         self.n_samples = p["n_samples"]
@@ -62,6 +68,7 @@ class ZoneBeamformer:
         self.nx, self.nz = nx, nz
 
         self._plans: list[tuple[np.ndarray, object, np.ndarray]] | None = None
+        self._full_XZ: tuple[np.ndarray, np.ndarray] | None = None
 
     def _build_plans(self) -> None:
         """Precompute (columns, DAS matrix, lateral weights) per scanline."""
@@ -82,6 +89,89 @@ class ZoneBeamformer:
             plans.append((cols, M, w))
         self._plans = plans
 
+    def _full_grid(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._full_XZ is None:
+            self._full_XZ = np.meshgrid(self.x_grid, self.z_grid)
+        return self._full_XZ
+
+    def _beamform_fsa_pair(
+        self, gt_frame: np.ndarray, recon_frame: np.ndarray | None = None
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        """
+        Synthetic-aperture FSA beamforming.
+
+        FSA stores one TX event on the zarr scanline axis. Each TX contributes
+        to the full image grid, so caching all full-grid DAS matrices would be
+        memory-heavy; build each TX matrix, apply it to the requested frame(s),
+        and immediately release it.
+        """
+        X, Z = self._full_grid()
+        iq_shape = 1j * np.array([self.n_samples, self.n_elem])
+        gt_img = np.zeros((self.nz, self.nx), dtype=np.complex64)
+        rec_img = (
+            np.zeros((self.nz, self.nx), dtype=np.complex64)
+            if recon_frame is not None
+            else None
+        )
+        used = 0
+
+        for sl in range(0, min(len(self.tx_delays), gt_frame.shape[1]), self.tx_step):
+            delays = self.tx_delays[sl]
+            if np.all(np.isnan(delays)):
+                continue
+            M = pymust.dasmtx(iq_shape, X, Z, delays, self.param)
+
+            iq_gt = (gt_frame[:, sl, 0] + 1j * gt_frame[:, sl, 1]).T
+            gt_img += (M @ iq_gt.flatten(order="F")).reshape(
+                (self.nz, self.nx), order="F"
+            )
+
+            if recon_frame is not None and rec_img is not None:
+                iq_rec = (recon_frame[:, sl, 0] + 1j * recon_frame[:, sl, 1]).T
+                rec_img += (M @ iq_rec.flatten(order="F")).reshape(
+                    (self.nz, self.nx), order="F"
+                )
+            used += 1
+
+        if used:
+            gt_img /= used
+            if rec_img is not None:
+                rec_img /= used
+        return gt_img, rec_img
+
+    def _beamform_fsa_many(
+        self, gt_frame: np.ndarray, recon_frames: dict[str, np.ndarray]
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        """Beamform several FSA reconstructions while building each DAS matrix once."""
+        X, Z = self._full_grid()
+        iq_shape = 1j * np.array([self.n_samples, self.n_elem])
+        gt_img = np.zeros((self.nz, self.nx), dtype=np.complex64)
+        recon_images = {
+            name: np.zeros((self.nz, self.nx), dtype=np.complex64)
+            for name in recon_frames
+        }
+        used = 0
+        for sl in range(0, min(len(self.tx_delays), gt_frame.shape[1]), self.tx_step):
+            delays = self.tx_delays[sl]
+            if np.all(np.isnan(delays)):
+                continue
+            matrix = pymust.dasmtx(iq_shape, X, Z, delays, self.param)
+            gt_iq = (gt_frame[:, sl, 0] + 1j * gt_frame[:, sl, 1]).T
+            gt_img += (matrix @ gt_iq.flatten(order="F")).reshape(
+                (self.nz, self.nx), order="F"
+            )
+            for name, frame in recon_frames.items():
+                iq = (frame[:, sl, 0] + 1j * frame[:, sl, 1]).T
+                recon_images[name] += (matrix @ iq.flatten(order="F")).reshape(
+                    (self.nz, self.nx), order="F"
+                )
+            used += 1
+        if used:
+            gt_img /= used
+            for image in recon_images.values():
+                image /= used
+        return gt_img, recon_images
+
     def beamform(self, frame: np.ndarray) -> np.ndarray:
         """
         Args:
@@ -91,6 +181,10 @@ class ZoneBeamformer:
         Returns:
             Complex image (nz, nx).
         """
+        if self.acquisition_type == "fsa" or self.beamforming_mode == "synthetic_aperture":
+            img, _ = self._beamform_fsa_pair(frame)
+            return img
+
         if self._plans is None:
             self._build_plans()
         assert self._plans is not None
@@ -118,8 +212,14 @@ class ZoneBeamformer:
 
         Returns (gt_db, recon_db), each (nz, nx) in [-db_range, 0].
         """
-        env_gt = np.abs(self.beamform(gt_frame))
-        env_rec = np.abs(self.beamform(recon_frame))
+        if self.acquisition_type == "fsa" or self.beamforming_mode == "synthetic_aperture":
+            gt_img, rec_img = self._beamform_fsa_pair(gt_frame, recon_frame)
+            assert rec_img is not None
+            env_gt = np.abs(gt_img)
+            env_rec = np.abs(rec_img)
+        else:
+            env_gt = np.abs(self.beamform(gt_frame))
+            env_rec = np.abs(self.beamform(recon_frame))
 
         _, C = pymust.tgc(env_gt)
         env_gt = np.maximum(env_gt * C, 1e-9)
@@ -129,3 +229,32 @@ class ZoneBeamformer:
         gt_db = np.clip(20.0 * np.log10(env_gt / ref), -db_range, 0)
         rec_db = np.clip(20.0 * np.log10(env_rec / ref), -db_range, 0)
         return gt_db, rec_db
+
+    def bmode_many(
+        self,
+        gt_frame: np.ndarray,
+        recon_frames: dict[str, np.ndarray],
+        db_range: float = 50.0,
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        """Beamform many outputs using one common ground-truth TGC/reference."""
+        if self.acquisition_type == "fsa" or self.beamforming_mode == "synthetic_aperture":
+            gt_img, recon_images = self._beamform_fsa_many(gt_frame, recon_frames)
+        else:
+            gt_img = self.beamform(gt_frame)
+            recon_images = {
+                name: self.beamform(frame) for name, frame in recon_frames.items()
+            }
+        env_gt = np.abs(gt_img)
+        _, gain = pymust.tgc(env_gt)
+        env_gt = np.maximum(env_gt * gain, 1e-9)
+        reference = env_gt.max()
+        gt_db = np.clip(20.0 * np.log10(env_gt / reference), -db_range, 0)
+        recon_db = {
+            name: np.clip(
+                20.0 * np.log10(np.maximum(np.abs(image) * gain, 1e-9) / reference),
+                -db_range,
+                0,
+            )
+            for name, image in recon_images.items()
+        }
+        return gt_db, recon_db

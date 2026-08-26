@@ -35,6 +35,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from ssl_ultrasound_representation.dataset import build_split_datasets
+from ssl_ultrasound_representation.dataset.dataset import load_local_dataset
 from ssl_ultrasound_representation.mae.model.rf_conv_mae import (
     RFConvMAE,
     RFMaeConfig,
@@ -199,19 +200,51 @@ def train(config: dict | None = None) -> dict:
         }
         if hf_repo
         else {
-            "local_zip": config.get(
-                "data_zip", "data/processed/ultrasonic_dataset.zarr.zip"
-            ),
+            # `local_zip` takes either a .zarr.zip or an unzipped .zarr directory
+            # (see dataset.load_local_dataset) — the NV builder produces the latter.
+            "local_zip": config.get("data_dir")
+            or config.get("data_zip", "data/processed/ultrasonic_dataset.zarr.zip"),
             "local_metadata": config.get(
                 "data_metadata", "data/processed/ultrasonic_dataset.metadata.json"
             ),
         }
     )
+
+    # Explicit subject lists override the ratio split. The NV builder sets
+    # `subject` to the publisher split name, so
+    # `--train-subjects train --val-subjects validation` reproduces the dataset's
+    # own 830/93 division; without it the ratio split sees two "subjects" and
+    # allocates both to train, leaving val empty.
+    split_kwargs = {
+        k: config[k]
+        for k in ("train_subjects", "val_subjects", "test_subjects")
+        if config.get(k)
+    }
+
+    if preload and not hf_repo:
+        # A preloaded NV run is 923 x 180 x 180 x 2 x 256 x 4 B = 61 GB; the rat
+        # set is 8.8 GB. Peeking at the store's shape costs one metadata read and
+        # turns an OOM kill hours in into a line of text now.
+        try:
+            _arr, _ = load_local_dataset(
+                data_source["local_zip"], data_source["local_metadata"]
+            )
+            n_zone = _arr.shape[3] if _arr.ndim >= 6 else 1
+            gb = _arr.size / max(n_zone, 1) * _arr.dtype.itemsize / 1e9
+            if gb > 8.0:
+                warnings.warn(
+                    f"preload=True will materialise ~{gb:.0f} GB of frames in RAM "
+                    f"(store {tuple(_arr.shape)}). Pass --no-preload unless the "
+                    "node really has that much."
+                )
+        except Exception as exc:  # noqa: BLE001 — a peek must never block training
+            warnings.warn(f"could not size-check the store ({exc})")
     overfit = config.get("overfit", False)
     splits, _ = build_split_datasets(
         **data_source,
         split_strategy=config.get("split_strategy", "subject"),
         ratios=config.get("split_ratios", (1.0, 0.0, 0.0) if overfit else (0.85, 0.15, 0.0)),
+        **split_kwargs,
         transform=normalize_frame,
         focal_zone=config.get("focal_zone", 0),
         preload=preload,
@@ -470,9 +503,30 @@ def main() -> None:
         "history and `ps` output.",
     )
     p.add_argument("--max-frames", type=int, dest="max_frames")
-    p.add_argument("--data-zip", dest="data_zip")
+    p.add_argument("--data-zip", dest="data_zip", help="local .zarr.zip store")
+    p.add_argument(
+        "--data-dir",
+        dest="data_dir",
+        help="local unzipped .zarr directory store (what the NV-Raw2Insights "
+        "builder writes). Takes precedence over --data-zip.",
+    )
+    p.add_argument(
+        "--train-subjects", nargs="+", dest="train_subjects",
+        help="explicit subject names for the train split (overrides the ratio "
+        "split). For NV data: --train-subjects train --val-subjects validation.",
+    )
+    p.add_argument("--val-subjects", nargs="+", dest="val_subjects")
+    p.add_argument("--test-subjects", nargs="+", dest="test_subjects")
     p.add_argument("--data-metadata", dest="data_metadata")
     p.add_argument("--focal-zone", type=int, dest="focal_zone")
+    p.add_argument(
+        "--beamform-params",
+        dest="beamform_params",
+        help="acquisition geometry JSON for the B-mode snapshots. Defaults to the "
+        "MultiFocal rat geometry in configs/; NV runs must point at the "
+        "*.beamform_params.json emitted by the NV builder, which carries "
+        "acquisition_type=fsa.",
+    )
     p.add_argument("--device")
     p.add_argument("--run-name", dest="run_name")
     p.add_argument("--vis-every", type=int, dest="vis_every")
