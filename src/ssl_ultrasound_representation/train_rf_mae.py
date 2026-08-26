@@ -187,6 +187,16 @@ def train(config: dict | None = None) -> dict:
     criterion = RFMaeLoss(weights)
 
     print(f"Model: {model.describe()}")
+    # The masker's own settings, which `describe()` cannot show: it only knows
+    # `l_max`, because that is what the receptive-field assertion needs. Without
+    # this line a log cannot answer "what masking did this run actually use?",
+    # which is the first question asked of any near-zero-correlation result.
+    print(
+        f"Mask: ratio={masker.mask_ratio} l_min={masker.l_min} l_max={masker.l_max} "
+        f"p_chan={masker.p_chan} share_lateral={masker.share_lateral} "
+        f"seed={masker.seed} (val seed={val_masker.seed})"
+    )
+    print(f"Loss: {criterion.config()}  |  lateral={lateral}")
     print(f"Device: {device}  |  AMP: {use_amp}  |  rows/frame: {rows_per_frame}")
 
     # ── data ───────────────────────────────────────────────────────────────
@@ -240,6 +250,13 @@ def train(config: dict | None = None) -> dict:
         except Exception as exc:  # noqa: BLE001 — a peek must never block training
             warnings.warn(f"could not size-check the store ({exc})")
     overfit = config.get("overfit", False)
+    # `--max-frames` used to reach only the HF branch, so on a local store it was
+    # silently dropped; and `--overfit`'s only lever was the ratio split, which
+    # `split_by_subject` ignores whenever explicit subjects are given. Both made
+    # `--overfit --max-frames 2` train on the full corpus. Cap explicitly here.
+    max_frames = config.get("max_frames")
+    if overfit and not max_frames:
+        max_frames = config.get("overfit_frames", 2)
     splits, _ = build_split_datasets(
         **data_source,
         split_strategy=config.get("split_strategy", "subject"),
@@ -249,9 +266,15 @@ def train(config: dict | None = None) -> dict:
         focal_zone=config.get("focal_zone", 0),
         preload=preload,
         share_memory=preload and num_workers > 0,
+        max_frames_per_split=max_frames,
     )
     if overfit:
         splits["val"] = splits["train"]
+    if max_frames:
+        print(
+            f"[data] capped to {max_frames} frame(s) per split "
+            f"(train={len(splits['train'])}, val={len(splits['val'])})"
+        )
 
     loader_kwargs = dict(
         batch_size=batch_size,

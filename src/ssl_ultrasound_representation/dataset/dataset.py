@@ -457,6 +457,7 @@ def build_split_datasets(
     share_memory: bool = False,
     token: str | None = None,
     download_workers: int = DEFAULT_DOWNLOAD_WORKERS,
+    max_frames_per_split: int | None = None,
     **split_kwargs,
 ) -> tuple[dict[str, UltrasoundMAEDataset], dict]:
     """
@@ -509,6 +510,13 @@ def build_split_datasets(
         splits = split_by_file(meta, **split_kwargs)
     else:
         raise ValueError(f"unknown split_strategy: {split_strategy!r}")
+
+    # Applied to the index lists, so a capped run never preloads (or downloads)
+    # frames it will not use. `max_frames` on the HF path caps the *download*;
+    # this caps every split regardless of where the store came from, which is
+    # what a local --overfit run needs.
+    if max_frames_per_split:
+        splits = {k: v[:max_frames_per_split] for k, v in splits.items()}
 
     datasets = {
         name: UltrasoundMAEDataset(
