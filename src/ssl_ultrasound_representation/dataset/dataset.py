@@ -197,11 +197,26 @@ def load_local_dataset(
     The store type is detected from the path rather than the suffix.
     """
     path = Path(zip_path)
+    meta_path = Path(metadata_path)
+    # Check existence up front. Without this a missing store falls through to the
+    # ZipStore branch and surfaces as a bare FileNotFoundError from deep inside
+    # zipfile, which reads like a corrupt archive rather than "the build step
+    # never produced this".
+    if not path.exists():
+        raise FileNotFoundError(
+            f"zarr store not found: {path}\n"
+            "Nothing was read — the conversion step either did not run, failed, "
+            "or wrote somewhere else. If this is a node-local path (/tmp/...), "
+            "check the build ran on THIS node."
+        )
+    if not meta_path.is_file():
+        raise FileNotFoundError(f"metadata json not found: {meta_path}")
+
     if path.is_dir():
         arr = _open_zarr_dir_array(path, array_name=array_name)
     else:
         arr = _open_zarr_array(path, array_name=array_name)
-    metadata = json.loads(Path(metadata_path).read_text())
+    metadata = json.loads(meta_path.read_text())
     return arr, metadata
 
 

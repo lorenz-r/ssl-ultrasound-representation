@@ -19,6 +19,20 @@ dependencies = [
   "torch (>=2.4.1,<2.5)",
   "wandb (>=0.27.2,<0.28.0)",
   "scikit-learn (>=1.9.0,<2.0.0)",
+  # ── feature/new-arch: src/ssl_us ───────────────────────────────────────────
+  # torchvision is held to the 0.19 line because that is what pairs with the
+  # torch 2.4.1+cu118 build above. new-arch asks for >=0.21, which requires
+  # torch >=2.6 and would pull the sm_61 pin out from under the container.
+  "torchvision (>=0.19,<0.20)",
+  "timm (>=1.0)",              # ssl_us/eval/external.py (DINOv3 baseline)
+  "transformers (>=4.45)",     # ssl_us/eval/external.py
+  "scikit-image (>=0.24)",     # ssl_us/eval/features.py
+  "umap-learn (>=0.5)",        # ssl_us/eval/viz.py
+  "datasets (>=3.0)",          # scripts/beamform/*, scripts/data/probe_nvidia_frames.py
+  # NOT declared here on purpose: keras + zea (==0.1.4), used only by
+  # src/ssl_us/beamform/* and scripts/beamform/*. feature/new-arch's own note
+  # says that stack runs in a separate KERAS_BACKEND=jax virtualenv to keep
+  # keras+JAX-CUDA away from torch-CUDA; installing it here would defeat that.
 ]
 
 [tool.poetry]
