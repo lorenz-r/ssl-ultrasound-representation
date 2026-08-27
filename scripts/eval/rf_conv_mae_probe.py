@@ -121,6 +121,7 @@ def main() -> int:
     rows: list[dict] = []
     not_run: dict[str, str] = {}
     feature_dim = None
+    trained_epoch, lateral_used = None, None
     for name, rand in arms:
         encoder = RFConvMAEEncoder(
             args.checkpoint, device=args.device, row_batch=args.row_batch,
@@ -128,6 +129,8 @@ def main() -> int:
         )
         print(f"\n[probe] {name} | epoch {encoder.epoch} | dim {encoder.dim} "
               f"| lateral {encoder.lateral} | frames {keep}", flush=True)
+        if not rand:
+            trained_epoch, lateral_used = encoder.epoch, encoder.lateral
         feats, frame_ids = extract_frame_features(
             _Sub(), encoder, [str(i) for i in range(keep)])
         feature_dim = int(feats.shape[1])
@@ -170,11 +173,24 @@ def main() -> int:
                   f"beats_random={c['beats_random']}  separated={c['separated']}")
 
     out_dir = Path(args.out)
+    # Enough provenance that a results.json is interpretable on its own months
+    # later: which checkpoint, at which epoch, over which frames, with which
+    # feature definition. `epoch` and `lateral` are read off the encoder rather
+    # than the CLI, so they describe the weights that were actually loaded.
     write_report(rows, not_run, {
-        "checkpoint": str(args.checkpoint),
+        "checkpoint": str(Path(args.checkpoint).resolve()),
+        "checkpoint_epoch": trained_epoch,
+        "encoders": [name for name, _ in arms],
         "contrast": contrast,
-        "split": args.split, "n_frames": keep, "stage": args.stage,
+        "split": args.split,
+        "n_frames": keep,
+        "stage": args.stage,
         "feature_dim": feature_dim,
+        "lateral": lateral_used,
+        "labels_file": str(Path(args.labels).resolve()),
+        "store": str(Path(args.data_dir).resolve()),
+        "targets": [{"target": t, "level": lv, "kind": k} for t, lv, k in NV_FRAME_TARGETS],
+        "seed": args.seed,
         "protocol": "ssl_us.eval.probes (PCA-64, GroupKFold by frame, inner-CV penalty, bootstrap CI)",
     }, out_dir)
     print(f"\n[probe] wrote {out_dir/'results.json'} and {out_dir/'results.md'}")
