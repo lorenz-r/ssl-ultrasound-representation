@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import warnings
 from pathlib import Path
 
@@ -337,8 +338,15 @@ def train(config: dict | None = None) -> dict:
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
     scheduler = LambdaLR(optimizer, lr_lambda)
+    # Per-run directory. This used to be a hardcoded `checkpoints/best_rf_conv_mae.pt`,
+    # so every run silently overwrote the previous one — two experiments could not
+    # coexist, and a probe could not name which weights it was reading.
+    safe_run = re.sub(r"[^A-Za-z0-9._-]+", "-", config.get("run_name") or "rf_conv_mae")
+    ckpt_dir = Path(config.get("checkpoint_dir") or f"checkpoints/{safe_run}")
+    ckpt_path = ckpt_dir / "best_rf_conv_mae.pt"
     if save_checkpoints:
-        Path("checkpoints").mkdir(parents=True, exist_ok=True)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Checkpoints: {ckpt_path}")
 
     # ── loop ───────────────────────────────────────────────────────────────
     best_corr = -float("inf")
@@ -436,7 +444,7 @@ def train(config: dict | None = None) -> dict:
         if v_steps and val_corr > best_corr:
             best_corr = val_corr
             if save_checkpoints:
-                path = "checkpoints/best_rf_conv_mae.pt"
+                path = str(ckpt_path)
                 torch.save(
                     {
                         "epoch": epoch,
@@ -552,6 +560,11 @@ def main() -> None:
     )
     p.add_argument("--device")
     p.add_argument("--run-name", dest="run_name")
+    p.add_argument(
+        "--checkpoint-dir", dest="checkpoint_dir",
+        help="where to write best_rf_conv_mae.pt. Defaults to checkpoints/<run-name>/ "
+             "so concurrent experiments do not overwrite each other.",
+    )
     p.add_argument("--vis-every", type=int, dest="vis_every")
     p.add_argument("--overfit", action="store_true", default=None)
     p.add_argument("--no-wandb", action="store_true")
