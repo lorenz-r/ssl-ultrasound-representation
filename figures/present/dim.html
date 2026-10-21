@@ -1,0 +1,1448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pre-training Foundation Models for Raw Ultrasound</title>
+    <!-- Tailwind CSS for modern layouts -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Plus Jakarta Sans', 'sans-serif'],
+                        mono: ['Space Grotesk', 'monospace'],
+                    },
+                    colors: {
+                        brand: {
+                            50: '#f0f9ff',
+                            100: '#e0f2fe',
+                            400: '#38bdf8',
+                            500: '#0ea5e9',
+                            600: '#0284c7',
+                            950: '#0369a1',
+                        },
+                        accent: {
+                            neon: '#39ff14',
+                            coral: '#ff5a5f',
+                            purple: '#8b5cf6',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        /* Base slide framework layout scaling */
+        .slide-deck-container {
+            aspect-ratio: 16 / 9;
+            width: 100%;
+            max-width: 1200px;
+        }
+        
+        .slide {
+            display: none;
+            opacity: 0;
+            transition: opacity 0.5s ease-in-out;
+        }
+
+        .slide.active {
+            display: flex;
+            opacity: 1;
+        }
+
+        /* Custom Keyframe Animations */
+        @keyframes wave-pulse {
+            0%, 100% { transform: scale(1); opacity: 0.2; }
+            50% { transform: scale(1.05); opacity: 0.6; }
+        }
+        .bg-wave-glow {
+            animation: wave-pulse 8s infinite ease-in-out;
+        }
+
+        /* Continuous pulse for active elements */
+        @keyframes pulse-ring {
+            0% { transform: scale(0.95); opacity: 1; }
+            50% { transform: scale(1.1); opacity: 0.5; }
+            100% { transform: scale(1.2); opacity: 0; }
+        }
+        .pulse-indicator::after {
+            content: '';
+            position: absolute;
+            width: 100%; height: 100%;
+            border: 2px solid #38bdf8;
+            border-radius: 50%;
+            animation: pulse-ring 2s infinite ease-in-out;
+        }
+
+        /* Hide scrollbars elegantly */
+        ::-webkit-scrollbar {
+            display: none;
+        }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-900 font-sans min-h-screen flex flex-col justify-between p-4 overflow-hidden select-none">
+
+    <!-- TOP HEADER -->
+    <header class="max-w-6xl w-full mx-auto flex justify-between items-center px-4 py-2 border-b border-slate-200/80 z-20">
+        <div class="flex items-center gap-3">
+            <div class="w-2.5 h-2.5 rounded-full bg-brand-400 animate-pulse"></div>
+            <span class="text-xs font-mono tracking-widest text-slate-600 uppercase">Acoustic Physics & MAE Pre-training</span>
+        </div>
+        <div class="text-xs font-mono text-slate-500" id="clock">06:00 PM</div>
+    </header>
+
+    <!-- CORE SLIDE CONTAINER -->
+    <main class="flex-grow flex items-center justify-center py-6 w-full z-10">
+        <div class="slide-deck-container bg-white/90 border border-slate-200 rounded-3xl relative overflow-hidden shadow-2xl p-8 flex flex-col justify-between">
+            
+            <!-- Abstract background wave pattern -->
+            <div class="absolute inset-0 bg-wave-glow pointer-events-none z-0">
+                <svg width="100%" height="100%" class="opacity-10" xmlns="http://www.w3.org/2000/svg">
+                    <defs>
+                        <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+                            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#38bdf8" stroke-width="0.5"/>
+                        </pattern>
+                    </defs>
+                    <rect width="100%" height="100%" fill="url(#grid)" />
+                </svg>
+            </div>
+
+            <!-- ============================================== -->
+            <!-- SLIDE 1: INTRO / TITLE -->
+            <!-- ============================================== -->
+            <div class="slide active flex-col justify-between h-full w-full z-10" id="slide-1">
+                <div class="flex-grow flex flex-col justify-center items-start space-y-6 max-w-4xl">
+                    <div class="bg-brand-500/10 text-brand-400 border border-brand-500/20 px-4 py-1.5 rounded-full text-xs font-mono tracking-wider uppercase">
+                        Self Supervised Representation Learning
+                    </div>
+                    <h1 class="text-6xl font-extrabold tracking-tight leading-tight">
+                      MAE Models for <span class="bg-gradient-to-r from-brand-400 to-indigo-400 bg-clip-text text-transparent">Raw Ultrasound</span>
+                    </h1>
+                    <p class="text-lg text-slate-600 font-light max-w-2xl leading-relaxed">
+                        Retaining multi-element acoustic wave physics within extreme computational and VRAM limitations using structured Masked Autoencoders (MAE).
+                    </p>
+                </div>
+                <div class="flex justify-between items-center border-t border-slate-200/60 pt-4 text-xs font-mono text-slate-500">
+                    <div>RESEARCH PROPOSAL & HARDWARE BLUEPRINT</div>
+                    <div>SLIDE 01 / 10</div>
+                </div>
+            </div>
+
+            <!-- ============================================== -->
+            <!-- SLIDE 2: MULTIFOCAL METHOD (ANIMATED SIMULATION) -->
+            <!-- ============================================== -->
+            <div class="slide flex-col justify-between h-full w-full z-10" id="slide-2">
+                <div class="flex justify-between items-start mb-1">
+                    <div>
+                        <span class="text-xs font-mono tracking-widest text-brand-400 uppercase">Phase 01: Acquisition</span>
+                        <h2 class="text-3xl font-extrabold mt-1">Multifocal Acquisition Loop</h2>
+                    </div>
+                    <button id="btn-trigger-foci" class="bg-brand-500/20 hover:bg-brand-500/30 text-brand-400 border border-brand-500/30 px-3 py-1.5 rounded-lg text-xs font-mono transition">
+                        <i class="fa-solid fa-play mr-1.5"></i>Trigger Loop
+                    </button>
+                </div>
+
+                <div class="flex-grow grid grid-cols-12 gap-3 items-stretch">
+
+                    <!-- LEFT: Live dimension counters -->
+                    <div class="col-span-3 flex flex-col gap-2 justify-center">
+                        <div class="bg-white border border-slate-200 p-3 rounded-xl">
+                            <span class="text-[10px] font-mono text-slate-500 block uppercase tracking-wide">Scan Line</span>
+                            <div class="flex items-baseline gap-1 mt-0.5">
+                                <span class="text-2xl font-bold font-mono text-brand-500" id="dim-scanline">1</span>
+                                <span class="text-xs font-mono text-slate-500">/ 192</span>
+                            </div>
+                            <div class="mt-1.5 h-1 bg-slate-200 rounded-full overflow-hidden">
+                                <div class="h-full bg-brand-400 transition-all duration-100" id="scanline-progress" style="width:0.5%"></div>
+                            </div>
+                            <span class="text-[10px] font-mono text-slate-500 mt-1 block">lateral positions</span>
+                        </div>
+                        <div class="bg-white border border-slate-200 p-3 rounded-xl">
+                            <span class="text-[10px] font-mono text-slate-500 block uppercase tracking-wide">Focal Zone</span>
+                            <div class="flex items-baseline gap-1 mt-0.5">
+                                <span class="text-2xl font-bold font-mono text-yellow-500" id="dim-focalzone">1</span>
+                                <span class="text-xs font-mono text-slate-500">/ 3</span>
+                            </div>
+                            <span class="text-[10px] font-mono text-slate-500 mt-1 block" id="fz-depth-label">17.7 mm depth</span>
+                        </div>
+                        <div class="bg-white border border-slate-200 p-3 rounded-xl">
+                            <span class="text-[10px] font-mono text-slate-500 block uppercase tracking-wide">RX Sub-Aperture</span>
+                            <div class="flex items-baseline gap-1 mt-0.5">
+                                <span class="text-2xl font-bold font-mono text-purple-500" id="dim-rxpass">1</span>
+                                <span class="text-xs font-mono text-slate-500">/ 2</span>
+                            </div>
+                            <span class="text-[10px] font-mono text-slate-500 mt-1 block" id="rx-aperture-label">Ch 1–128 of 192</span>
+                        </div>
+                        <div class="bg-brand-50 border border-brand-200 p-3 rounded-xl">
+                            <span class="text-[10px] font-mono text-brand-600 block uppercase tracking-wide">Samples / Event</span>
+                            <span class="text-2xl font-bold font-mono text-brand-500 block mt-0.5">2,560</span>
+                            <span class="text-[10px] font-mono text-slate-500 mt-1 block">@ 31.25 MHz · ~50 mm</span>
+                        </div>
+                        <div class="bg-slate-50 border border-slate-200 p-3 rounded-xl">
+                            <span class="text-[10px] font-mono text-slate-500 block uppercase tracking-wide">Events / Frame</span>
+                            <span class="text-[10px] font-mono text-slate-600 mt-1 block">192 × 3 × 2 =</span>
+                            <span class="text-xl font-bold font-mono text-slate-700">1,152</span>
+                        </div>
+                    </div>
+
+                    <!-- CENTER: SVG probe + beam animation -->
+                    <div class="col-span-5 bg-slate-50 rounded-2xl border border-slate-200 p-2 flex items-center justify-center overflow-hidden">
+                        <svg id="svg-multifocal-sim" class="w-full h-full" viewBox="0 0 490 315" xmlns="http://www.w3.org/2000/svg">
+                            <!-- Tissue background -->
+                            <rect x="10" y="32" width="420" height="255" fill="rgba(241,245,249,0.7)"/>
+                            <!-- RX aperture 2 (ch 65–192) -->
+                            <rect id="rx-aper-2" x="150" y="8" width="280" height="24" rx="4"
+                                  fill="rgba(139,92,246,0.08)" stroke="rgba(139,92,246,0.35)" stroke-width="1.5" stroke-dasharray="4,3"/>
+                            <!-- RX aperture 1 (ch 1–128) -->
+                            <rect id="rx-aper-1" x="10" y="8" width="280" height="24" rx="4"
+                                  fill="rgba(139,92,246,0.20)" stroke="rgba(139,92,246,0.75)" stroke-width="1.5" stroke-dasharray="4,3"/>
+                            <!-- TX aperture window -->
+                            <rect id="tx-aperture-rect" x="10" y="8" width="140" height="24" rx="4"
+                                  fill="rgba(14,165,233,0.30)" stroke="#0ea5e9" stroke-width="2"/>
+                            <!-- Probe housing outline -->
+                            <rect x="10" y="8" width="420" height="24" rx="4" fill="none" stroke="#94a3b8" stroke-width="1.5"/>
+                            <!-- Element ticks (generated by JS) -->
+                            <g id="array-elements"></g>
+                            <!-- Labels -->
+                            <text id="tx-ap-label" x="80" y="6" fill="#0ea5e9" font-family="Space Grotesk" font-size="8" text-anchor="middle" font-weight="bold">TX 64</text>
+                            <text x="10" y="6" fill="#7c3aed" font-family="Space Grotesk" font-size="8" font-weight="bold">RX1 128</text>
+                            <text x="430" y="6" fill="#7c3aed" font-family="Space Grotesk" font-size="8" text-anchor="end" font-weight="bold">RX2 128</text>
+                            <text x="440" y="22" fill="#475569" font-family="Space Grotesk" font-size="9" font-weight="bold">192 elem</text>
+                            <!-- Scan line indicator -->
+                            <line id="scanline-indicator" x1="220" y1="32" x2="220" y2="287"
+                                  stroke="#0ea5e9" stroke-width="1.5" stroke-dasharray="5,3" opacity="0.7"/>
+                            <!-- Beam paths -->
+                            <g id="beam-paths">
+                                <path id="path-shallow" d="M220,32 L220,121 M185,32 L220,121 M255,32 L220,121"
+                                      fill="none" stroke="rgba(34,211,238,0.5)" stroke-width="1.5" stroke-dasharray="4"/>
+                                <path id="path-mid" d="M220,32 L220,180 M165,32 L220,180 M275,32 L220,180"
+                                      fill="none" stroke="rgba(250,204,21,0.3)" stroke-width="1.5" stroke-dasharray="4"/>
+                                <path id="path-deep" d="M220,32 L220,239 M140,32 L220,239 M300,32 L220,239"
+                                      fill="none" stroke="rgba(99,102,241,0.2)" stroke-width="1.5" stroke-dasharray="4"/>
+                            </g>
+                            <!-- Focal targets -->
+                            <circle cx="220" cy="121" r="10" fill="none" stroke="#22d3ee" stroke-width="2" opacity="0.9"/>
+                            <circle cx="220" cy="180" r="13" fill="none" stroke="#facc15" stroke-width="2" opacity="0.7"/>
+                            <circle cx="220" cy="239" r="16" fill="none" stroke="#6366f1" stroke-width="2" opacity="0.5"/>
+                            <text x="234" y="125" fill="#22d3ee" font-family="Space Grotesk" font-size="10">F1: 17.7 mm</text>
+                            <text x="237" y="184" fill="#ca8a04" font-family="Space Grotesk" font-size="10">F2: 29.6 mm</text>
+                            <text x="240" y="243" fill="#6366f1" font-family="Space Grotesk" font-size="10">F3: 41.4 mm</text>
+                            <!-- Depth ruler -->
+                            <line x1="438" y1="32" x2="438" y2="287" stroke="#94a3b8" stroke-width="1"/>
+                            <line x1="433" y1="32" x2="443" y2="32" stroke="#94a3b8" stroke-width="1"/>
+                            <line x1="433" y1="159" x2="443" y2="159" stroke="#94a3b8" stroke-width="1"/>
+                            <line x1="433" y1="287" x2="443" y2="287" stroke="#94a3b8" stroke-width="1"/>
+                            <text x="447" y="36" fill="#64748b" font-family="Space Grotesk" font-size="9">0 mm</text>
+                            <text x="447" y="163" fill="#64748b" font-family="Space Grotesk" font-size="9">25 mm</text>
+                            <text x="447" y="291" fill="#64748b" font-family="Space Grotesk" font-size="9">50 mm</text>
+                            <text x="482" y="162" fill="#475569" font-family="Space Grotesk" font-size="9" font-weight="bold"
+                                  transform="rotate(90,482,162)" text-anchor="middle">2560 samples</text>
+                            <!-- Scan line ruler -->
+                            <line x1="10" y1="296" x2="430" y2="296" stroke="#94a3b8" stroke-width="0.5"/>
+                            <line x1="10" y1="292" x2="10" y2="300" stroke="#94a3b8" stroke-width="1"/>
+                            <line x1="430" y1="292" x2="430" y2="300" stroke="#94a3b8" stroke-width="1"/>
+                            <text x="10" y="310" fill="#64748b" font-family="Space Grotesk" font-size="8">SL1</text>
+                            <text x="220" y="310" fill="#0ea5e9" font-family="Space Grotesk" font-size="8" text-anchor="middle" font-weight="bold">← 192 scan lines →</text>
+                            <text x="430" y="310" fill="#64748b" font-family="Space Grotesk" font-size="8" text-anchor="end">192</text>
+                            <!-- Pulses container -->
+                            <g id="pulses-container"></g>
+                        </svg>
+                    </div>
+
+                    <!-- RIGHT: RcvData accumulation canvas -->
+                    <div class="col-span-4 bg-white rounded-2xl border border-slate-200 p-3 flex flex-col gap-2">
+                        <div class="flex justify-between items-center">
+                            <span class="text-[10px] font-mono text-slate-500 uppercase tracking-wide">RcvData buffer <span class="text-brand-500 font-bold">(frame 1)</span></span>
+                            <span class="text-[10px] font-mono text-slate-500" id="events-done">0 / 1,152</span>
+                        </div>
+                        <div class="flex gap-2 flex-grow min-h-0">
+                            <div class="flex items-center justify-center text-[9px] font-mono text-slate-500 shrink-0" style="writing-mode:vertical-rl;transform:rotate(180deg);width:14px;white-space:nowrap">
+                                2560 samples (depth) ↑
+                            </div>
+                            <div class="flex flex-col flex-grow min-h-0 gap-1">
+                                <div class="flex-grow relative border border-slate-200 rounded-lg overflow-hidden bg-slate-50">
+                                    <canvas id="data-matrix-canvas" class="w-full h-full block"></canvas>
+                                    <div class="absolute left-1 top-0 h-1/3 flex items-center pointer-events-none">
+                                        <span class="text-[8px] font-mono text-cyan-700 font-bold bg-white/80 px-0.5 rounded">F1</span>
+                                    </div>
+                                    <div class="absolute left-1 top-1/3 h-1/3 flex items-center pointer-events-none">
+                                        <span class="text-[8px] font-mono text-yellow-700 font-bold bg-white/80 px-0.5 rounded">F2</span>
+                                    </div>
+                                    <div class="absolute left-1 top-2/3 h-1/3 flex items-center pointer-events-none">
+                                        <span class="text-[8px] font-mono text-indigo-700 font-bold bg-white/80 px-0.5 rounded">F3</span>
+                                    </div>
+                                </div>
+                                <div class="flex justify-between text-[9px] font-mono text-slate-500">
+                                    <span>SL1</span>
+                                    <span class="text-brand-500 font-bold">← 192 scan lines →</span>
+                                    <span>192</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="bg-slate-50 rounded-xl p-2 border border-slate-200">
+                            <div class="grid grid-cols-3 gap-1 text-[10px] font-mono text-center">
+                                <div class="flex flex-col items-center gap-0.5">
+                                    <div class="w-3 h-3 rounded-sm" style="background:rgba(34,211,238,0.75)"></div>
+                                    <span class="text-slate-700 font-bold">F1</span>
+                                    <span class="text-slate-500">17.7 mm</span>
+                                </div>
+                                <div class="flex flex-col items-center gap-0.5">
+                                    <div class="w-3 h-3 rounded-sm" style="background:rgba(202,138,4,0.85)"></div>
+                                    <span class="text-slate-700 font-bold">F2</span>
+                                    <span class="text-slate-500">29.6 mm</span>
+                                </div>
+                                <div class="flex flex-col items-center gap-0.5">
+                                    <div class="w-3 h-3 rounded-sm" style="background:rgba(99,102,241,0.75)"></div>
+                                    <span class="text-slate-700 font-bold">F3</span>
+                                    <span class="text-slate-500">41.4 mm</span>
+                                </div>
+                            </div>
+                            <div class="mt-1.5 text-[9px] font-mono text-slate-500 text-center">
+                                each col = 1 scan line · 2,560 samples · 2 RX passes
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+
+                <div class="flex justify-between items-center border-t border-slate-200/60 pt-3 text-xs font-mono text-slate-500">
+                    <div>192 SCAN LINES × 3 FOCI × 2 RX PASSES = 1,152 EVENTS · 2,560 SAMPLES EACH</div>
+                    <div>SLIDE 02 / 10</div>
+                </div>
+            </div>
+
+            <!-- ============================================== -->
+            <!-- SLIDE 3: DATA EXPLOSION & DIMENSIONS -->
+            <!-- ============================================== -->
+            <div class="slide flex-col justify-between h-full w-full z-10" id="slide-3">
+                <div class="flex justify-between items-start mb-2">
+                    <div>
+                        <span class="text-xs font-mono tracking-widest text-brand-400 uppercase">Phase 02: The Metric Scale</span>
+                        <h2 class="text-3xl font-extrabold mt-1">Dimensionality Explosion</h2>
+                    </div>
+                </div>
+
+                <div class="flex-grow grid grid-cols-12 gap-6 items-center my-auto">
+
+                    <!-- LEFT: Multiplication chain -->
+                    <div class="col-span-8 flex flex-col gap-4">
+
+                        <!-- Row 1: acquisition structure (RX passes already combined → 192 elem) -->
+                        <div class="flex flex-col gap-1">
+                            <span class="text-[10px] font-mono text-slate-500 uppercase tracking-widest">Acquisition structure (per frame · RX sub-apertures already combined)</span>
+                            <div class="flex items-stretch gap-2">
+                                <div class="flex-1 bg-cyan-50 border border-cyan-200 rounded-xl p-3 flex flex-col items-center justify-center">
+                                    <span class="text-3xl font-extrabold font-mono text-cyan-600">192</span>
+                                    <span class="text-[10px] font-mono text-cyan-700 mt-0.5">scan lines</span>
+                                    <div class="w-full h-1.5 bg-cyan-100 rounded-full mt-2 overflow-hidden">
+                                        <div class="h-full bg-cyan-400 rounded-full" style="width:100%"></div>
+                                    </div>
+                                </div>
+                                <div class="flex items-center text-xl font-bold text-slate-400 px-1">×</div>
+                                <div class="flex-none w-28 bg-yellow-50 border border-yellow-200 rounded-xl p-3 flex flex-col items-center justify-center">
+                                    <span class="text-3xl font-extrabold font-mono text-yellow-600">3</span>
+                                    <span class="text-[10px] font-mono text-yellow-700 mt-0.5">focal zones</span>
+                                    <div class="w-full h-1.5 bg-yellow-100 rounded-full mt-2 overflow-hidden">
+                                        <div class="h-full bg-yellow-400 rounded-full" style="width:1.5%"></div>
+                                    </div>
+                                </div>
+                                <div class="flex items-center text-xl font-bold text-slate-400 px-1">=</div>
+                                <div class="flex-none w-32 bg-emerald-50 border-2 border-emerald-300 rounded-xl p-3 flex flex-col items-center justify-center">
+                                    <span class="text-2xl font-extrabold font-mono text-emerald-600">576</span>
+                                    <span class="text-[10px] font-mono text-emerald-700 mt-0.5">events / frame</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Connector -->
+                        <div class="flex items-center gap-3 pl-4">
+                            <div class="flex flex-col items-center">
+                                <div class="w-px h-3 bg-slate-300"></div>
+                                <i class="fa-solid fa-chevron-down text-slate-400 text-xs"></i>
+                            </div>
+                            <span class="text-xs font-mono text-slate-500">each event contains:</span>
+                        </div>
+
+                        <!-- Row 2: per-event dimensions -->
+                        <div class="flex flex-col gap-1">
+                            <span class="text-[10px] font-mono text-slate-500 uppercase tracking-widest">Per event (one transmit–receive cycle)</span>
+                            <div class="flex items-stretch gap-2">
+                                <div class="flex-none w-36 bg-orange-50 border border-orange-200 rounded-xl p-3 flex flex-col items-center justify-center">
+                                    <span class="text-3xl font-extrabold font-mono text-orange-600">192</span>
+                                    <span class="text-[10px] font-mono text-orange-700 mt-0.5">RX elements</span>
+                                    <div class="w-full h-1.5 bg-orange-100 rounded-full mt-2 overflow-hidden">
+                                        <div class="h-full bg-orange-400 rounded-full" style="width:100%"></div>
+                                    </div>
+                                </div>
+                                <div class="flex items-center text-xl font-bold text-slate-400 px-1">×</div>
+                                <div class="flex-1 bg-brand-50 border border-brand-200 rounded-xl p-3 flex flex-col items-center justify-center">
+                                    <span class="text-3xl font-extrabold font-mono text-brand-600">2,560</span>
+                                    <span class="text-[10px] font-mono text-brand-700 mt-0.5">depth samples</span>
+                                    <div class="w-full h-1.5 bg-brand-100 rounded-full mt-2 overflow-hidden">
+                                        <div class="h-full bg-brand-400 rounded-full" style="width:100%"></div>
+                                    </div>
+                                </div>
+                                <div class="flex items-center text-xl font-bold text-slate-400 px-1">=</div>
+                                <div class="flex-none w-36 bg-slate-100 border border-slate-300 rounded-xl p-3 flex flex-col items-center justify-center">
+                                    <span class="text-xl font-extrabold font-mono text-slate-700">491,520</span>
+                                    <span class="text-[10px] font-mono text-slate-600 mt-0.5">values / event</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Final total row -->
+                        <div class="bg-red-50 border-2 border-red-200 rounded-2xl p-3 flex items-center gap-4">
+                            <div class="flex items-center gap-2 text-sm font-mono text-slate-600">
+                                <span class="text-emerald-600 font-bold">576</span>
+                                <span>events</span>
+                                <span class="text-slate-400">×</span>
+                                <span class="text-slate-700 font-bold">491,520</span>
+                                <span>values</span>
+                                <span class="text-slate-400">=</span>
+                            </div>
+                            <div class="flex flex-col">
+                                <span class="text-3xl font-extrabold font-mono text-red-600 leading-none">283,115,520</span>
+                                <span class="text-[10px] font-mono text-red-500 mt-0.5">float32 values per frame · ~1.1 GB in memory</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- RIGHT: In-context stats -->
+                    <div class="col-span-4 flex flex-col gap-3">
+                        <div class="bg-white border border-slate-200 rounded-2xl p-4 flex flex-col gap-3">
+                            <div>
+                                <span class="text-[10px] font-mono text-slate-500 uppercase tracking-widest block">Float32 in memory / frame</span>
+                                <span class="text-4xl font-extrabold font-mono text-slate-800 mt-1">~1.1 GB</span>
+                                <span class="text-[10px] font-mono text-slate-500 mt-0.5 block">vs. ~200 MB/frame on disk (int16, compressed)</span>
+                            </div>
+                            <div class="h-px bg-slate-200"></div>
+                            <!-- VRAM gauge -->
+                            <div>
+                                <div class="flex justify-between text-xs font-mono mb-1">
+                                    <span class="text-slate-600">RTX 3090/4090 VRAM</span>
+                                    <span class="text-brand-500 font-bold">24 GB</span>
+                                </div>
+                                <div class="w-full bg-slate-100 rounded-full overflow-hidden border border-slate-200 flex" style="height:14px">
+                                    <div class="h-full bg-brand-400" style="width:4.4%" title="1 frame"></div>
+                                    <div class="h-full bg-yellow-400" style="width:4.4%" title="2 frames"></div>
+                                    <div class="h-full bg-orange-400" style="width:4.4%" title="3 frames"></div>
+                                    <div class="h-full bg-accent-coral" style="width:4.4%" title="4 frames"></div>
+                                    <div class="h-full bg-red-400" style="width:4.4%" title="5 frames"></div>
+                                    <div class="h-full bg-red-500" style="width:4.4%" title="6 frames"></div>
+                                    <div class="h-full bg-red-600" style="width:4.4%" title="7 frames"></div>
+                                    <div class="h-full bg-red-700" style="width:4.4%" title="8 frames"></div>
+                                </div>
+                                <div class="flex justify-between text-[10px] font-mono text-slate-500 mt-0.5">
+                                    <span>each block = 1 frame (~1.1 GB)</span>
+                                    <span>8 fr = 8.8 GB</span>
+                                </div>
+                                <div class="text-[10px] font-mono text-slate-500 mt-0.5">+ model weights + activations + gradients</div>
+                            </div>
+                            <div class="h-px bg-slate-200"></div>
+                            <div>
+                                <span class="text-[10px] font-mono text-slate-500 uppercase tracking-widest block">Transformer tokens / frame</span>
+                                <span class="text-3xl font-extrabold font-mono text-accent-coral mt-1">3,600+</span>
+                                <span class="text-[10px] font-mono text-slate-500 mt-0.5 block">O(N²) attention → infeasible at batch > 1</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-between items-center border-t border-slate-200/60 pt-4 text-xs font-mono text-slate-500">
+                    <div>FOUR-DIMENSIONAL ACQUISITION TENSOR OVERWHELMS DIRECT TRAINING</div>
+                    <div>SLIDE 03 / 10</div>
+                </div>
+            </div>
+
+            <!-- ============================================== -->
+            <!-- SLIDE 4: DOMAIN TRADE-OFF MATRIX -->
+            <!-- ============================================== -->
+            <div class="slide flex-col justify-between h-full w-full z-10" id="slide-4">
+                <div class="flex justify-between items-start mb-2">
+                    <div>
+                        <span class="text-xs font-mono tracking-widest text-brand-400 uppercase">Phase 03: Data Representation</span>
+                        <h2 class="text-3xl font-extrabold mt-1">Domain Trade-off Matrix</h2>
+                    </div>
+                    <div class="text-right text-xs font-mono text-slate-500 leading-relaxed">
+                        <div class="font-bold text-slate-700">Beamforming: 192 ch × 2560 samples → 1 image column</div>
+                        <div>A lossy, irreversible compression — what survives?</div>
+                    </div>
+                </div>
+
+                <!-- Column header row -->
+                <div class="grid gap-1.5 mb-1" style="grid-template-columns: 2fr 1fr 1fr 3fr 3fr;">
+                    <div class="text-[10px] font-mono font-bold text-slate-400 uppercase px-2">Signal Feature</div>
+                    <div class="text-[10px] font-mono font-bold text-red-400 uppercase text-center">BF Image</div>
+                    <div class="text-[10px] font-mono font-bold text-emerald-500 uppercase text-center">Raw RF</div>
+                    <div class="text-[10px] font-mono font-bold text-slate-400 uppercase px-2">Physical Meaning</div>
+                    <div class="text-[10px] font-mono font-bold text-slate-400 uppercase px-2">Clinical / ML Relevance</div>
+                </div>
+
+                <!-- Matrix rows -->
+                <div class="flex-grow flex flex-col gap-1.5">
+
+                    <!-- Row: Wave Phase -->
+                    <div class="grid items-center rounded-xl border border-red-100 bg-red-50 px-3 py-2 gap-2" style="grid-template-columns: 2fr 1fr 1fr 3fr 3fr;">
+                        <div class="flex items-center gap-2">
+                            <span class="text-red-400"><i class="fa-solid fa-wave-square fa-fw"></i></span>
+                            <span class="text-sm font-bold text-slate-700">Wave Phase</span>
+                        </div>
+                        <div class="text-center text-red-500 font-bold">✗</div>
+                        <div class="text-center text-emerald-500 font-bold">✓</div>
+                        <div class="text-xs text-slate-600">DAS sums shift and add signals, destroying interference patterns — only amplitude survives</div>
+                        <div class="text-xs font-mono text-red-700 font-semibold">Tissue elastography · shear wave stiffness mapping · strain imaging</div>
+                    </div>
+
+                    <!-- Row: Per-element Time-of-Flight -->
+                    <div class="grid items-center rounded-xl border border-orange-100 bg-orange-50 px-3 py-2 gap-2" style="grid-template-columns: 2fr 1fr 1fr 3fr 3fr;">
+                        <div class="flex items-center gap-2">
+                            <span class="text-orange-400"><i class="fa-solid fa-stopwatch fa-fw"></i></span>
+                            <span class="text-sm font-bold text-slate-700">Per-element ToF</span>
+                        </div>
+                        <div class="text-center text-red-500 font-bold">✗</div>
+                        <div class="text-center text-emerald-500 font-bold">✓</div>
+                        <div class="text-xs text-slate-600">Arrival time per receiver encodes local speed-of-sound; beamformer assumes fixed c = 1540 m/s</div>
+                        <div class="text-xs font-mono text-orange-700 font-semibold">Speed-of-sound maps · fat vs. muscle vs. fluid · aberration correction</div>
+                    </div>
+
+                    <!-- Row: Angular Diversity -->
+                    <div class="grid items-center rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 gap-2" style="grid-template-columns: 2fr 1fr 1fr 3fr 3fr;">
+                        <div class="flex items-center gap-2">
+                            <span class="text-amber-500"><i class="fa-solid fa-arrows-left-right fa-fw"></i></span>
+                            <span class="text-sm font-bold text-slate-700">Angular Diversity</span>
+                        </div>
+                        <div class="text-center text-red-500 font-bold">✗</div>
+                        <div class="text-center text-emerald-500 font-bold">✓</div>
+                        <div class="text-xs text-slate-600">Each element observes the target from a unique angle; summation collapses directional information</div>
+                        <div class="text-xs font-mono text-amber-700 font-semibold">Muscle fiber orientation · specular vs. diffuse scatterers · synthetic aperture re-focusing</div>
+                    </div>
+
+                    <!-- Row: Backscatter Coherence -->
+                    <div class="grid items-center rounded-xl border border-purple-100 bg-purple-50 px-3 py-2 gap-2" style="grid-template-columns: 2fr 1fr 1fr 3fr 3fr;">
+                        <div class="flex items-center gap-2">
+                            <span class="text-purple-400"><i class="fa-solid fa-sitemap fa-fw"></i></span>
+                            <span class="text-sm font-bold text-slate-700">Backscatter Coherence</span>
+                        </div>
+                        <div class="text-center text-red-500 font-bold">✗</div>
+                        <div class="text-center text-emerald-500 font-bold">✓</div>
+                        <div class="text-xs text-slate-600">Cross-element correlation reveals how structured scatterers are; DAS summation erases inter-element relationships</div>
+                        <div class="text-xs font-mono text-purple-700 font-semibold">Scatterer density (QUS) · Nakagami parameter · liver fibrosis staging</div>
+                    </div>
+
+                    <!-- Row: Speckle Statistics -->
+                    <div class="grid items-center rounded-xl border border-indigo-100 bg-indigo-50 px-3 py-2 gap-2" style="grid-template-columns: 2fr 1fr 1fr 3fr 3fr;">
+                        <div class="flex items-center gap-2">
+                            <span class="text-indigo-400"><i class="fa-solid fa-grip fa-fw"></i></span>
+                            <span class="text-sm font-bold text-slate-700">Speckle Statistics</span>
+                        </div>
+                        <div class="text-center text-amber-500 font-bold text-sm">≈</div>
+                        <div class="text-center text-emerald-500 font-bold">✓</div>
+                        <div class="text-xs text-slate-600">Speckle encodes microstructure; beamformer PSF convolution distorts the native statistics</div>
+                        <div class="text-xs font-mono text-indigo-700 font-semibold">Tissue typing · tumor microstructure · non-invasive biopsy surrogates</div>
+                    </div>
+
+                    <!-- Row: Attenuation Depth Profile -->
+                    <div class="grid items-center rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 gap-2" style="grid-template-columns: 2fr 1fr 1fr 3fr 3fr;">
+                        <div class="flex items-center gap-2">
+                            <span class="text-slate-400"><i class="fa-solid fa-arrow-trend-down fa-fw"></i></span>
+                            <span class="text-sm font-bold text-slate-700">Attenuation Profile</span>
+                        </div>
+                        <div class="text-center text-amber-500 font-bold text-sm">≈</div>
+                        <div class="text-center text-emerald-500 font-bold">✓</div>
+                        <div class="text-xs text-slate-600">TGC partially compensates depth decay; raw signals carry the true frequency-dependent absorption curve</div>
+                        <div class="text-xs font-mono text-slate-600 font-semibold">Tissue attenuation coefficient · depth-dependent absorption · frequency compounding</div>
+                    </div>
+
+                </div>
+
+                <!-- Summary footer chips -->
+                <div class="grid grid-cols-3 gap-2 mt-2">
+                    <div class="bg-white border border-slate-200 rounded-xl px-3 py-2 text-center">
+                        <span class="text-[10px] font-mono font-bold text-slate-500 uppercase block">Legend</span>
+                        <span class="text-xs text-slate-500">✗ lost &nbsp;·&nbsp; ≈ distorted &nbsp;·&nbsp; ✓ intact</span>
+                    </div>
+                    <div class="bg-red-50 border border-red-100 rounded-xl px-3 py-2 flex items-center gap-2">
+                        <i class="fa-solid fa-image text-red-400"></i>
+                        <div>
+                            <div class="text-[10px] font-bold text-red-600 uppercase">Beamformed Image</div>
+                            <div class="text-[10px] text-slate-500">Anatomy visible · physics collapsed</div>
+                        </div>
+                    </div>
+                    <div class="bg-brand-500/5 border border-brand-500/20 rounded-xl px-3 py-2 flex items-center gap-2">
+                        <i class="fa-solid fa-database text-brand-400"></i>
+                        <div>
+                            <div class="text-[10px] font-bold text-brand-400 uppercase">Raw RF Channel Data</div>
+                            <div class="text-[10px] text-slate-500">Physics intact · ~1.1 GB/frame</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-between items-center border-t border-slate-200/60 pt-2 mt-2 text-xs font-mono text-slate-500">
+                    <div>BEAMFORMING = IRREVERSIBLE COLLAPSE · PHASE · COHERENCE · SPEED-OF-SOUND · ATTENUATION LOST</div>
+                    <div>SLIDE 04 / 10</div>
+                </div>
+            </div>
+
+            <!-- ============================================== -->
+            <!-- SLIDE 7: STEP 1 - FOCAL ZONE GATING -->
+            <!-- ============================================== -->
+            <div class="slide flex-col justify-between h-full w-full z-10" id="slide-7">
+                <div class="flex justify-between items-start mb-2">
+                    <div>
+                        <span class="text-xs font-mono tracking-widest text-brand-400 uppercase">Reduction Step 01</span>
+                        <h2 class="text-3xl font-extrabold mt-1">Focus Zone Depth Gating</h2>
+                    </div>
+                    <div class="flex gap-2">
+                        <button id="btn-trigger-gate" class="bg-brand-500/20 hover:bg-brand-500/30 text-brand-400 border border-brand-500/30 px-3 py-1.5 rounded-lg text-xs font-mono transition">
+                            <i class="fa-solid fa-scissors mr-1.5"></i>Simulate Slicing
+                        </button>
+                    </div>
+                </div>
+
+                <div class="flex-grow grid grid-cols-12 gap-8 items-center my-auto">
+                    <!-- Left: Numerical Impact -->
+                    <div class="col-span-4 space-y-6">
+                        <div>
+                            <span class="text-xs font-mono text-slate-500">REDUNDANCY ELIMINATION</span>
+                            <div class="text-5xl font-extrabold font-mono tracking-tight text-emerald-400 mt-2">
+                                -66.6%
+                            </div>
+                            <span class="text-sm font-mono text-slate-600 mt-1 block">Footprint instantly cut to 1/3</span>
+                        </div>
+                        
+                        <div class="bg-slate-100/50 border border-slate-200 p-4 rounded-xl space-y-2 text-xs">
+                            <p class="text-slate-700 font-semibold uppercase font-mono">Stitching Pipeline:</p>
+                            <ul class="list-disc list-inside space-y-1 text-slate-600">
+                                <li>Focus 1: Retain 0% to 33% depth</li>
+                                <li>Focus 2: Retain 33% to 66% depth</li>
+                                <li>Focus 3: Retain 66% to 100% depth</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <!-- Right: Gating Slicing Animation -->
+                    <div class="col-span-8 bg-slate-100/60 rounded-2xl border border-slate-200/80 h-[360px] p-6 flex flex-col justify-center items-center relative overflow-hidden">
+                        <svg class="w-full max-h-[300px]" viewBox="0 0 500 220" id="svg-gating">
+                            <!-- Input Focus Tracks -->
+                            <g transform="translate(10, 20)">
+                                <text x="0" y="25" fill="#22d3ee" font-family="Space Grotesk" font-size="11" font-weight="bold">FOCI 1</text>
+                                <rect x="60" y="10" width="300" height="20" rx="3" fill="rgba(34, 211, 238, 0.15)" stroke="#22d3ee" stroke-width="1.5" id="gate-track-1"/>
+                                <rect x="60" y="10" width="100" height="20" rx="3" fill="rgba(34, 211, 238, 0.6)" id="gate-slice-1"/>
+                            </g>
+
+                            <g transform="translate(10, 60)">
+                                <text x="0" y="25" fill="#facc15" font-family="Space Grotesk" font-size="11" font-weight="bold">FOCI 2</text>
+                                <rect x="60" y="10" width="300" height="20" rx="3" fill="rgba(250, 204, 21, 0.15)" stroke="#facc15" stroke-width="1.5" id="gate-track-2"/>
+                                <rect x="160" y="10" width="100" height="20" fill="rgba(250, 204, 21, 0.6)" id="gate-slice-2"/>
+                            </g>
+
+                            <g transform="translate(10, 100)">
+                                <text x="0" y="25" fill="#6366f1" font-family="Space Grotesk" font-size="11" font-weight="bold">FOCI 3</text>
+                                <rect x="60" y="10" width="300" height="20" rx="3" fill="rgba(99, 102, 241, 0.15)" stroke="#6366f1" stroke-width="1.5" id="gate-track-3"/>
+                                <rect x="260" y="10" width="100" height="20" rx="3" fill="rgba(99, 102, 241, 0.6)" id="gate-slice-3"/>
+                            </g>
+
+                            <!-- Stitch Target Track -->
+                            <g transform="translate(10, 160)" id="stitch-group">
+                                <text x="0" y="25" fill="#34d399" font-family="Space Grotesk" font-size="11" font-weight="bold">STITCHED</text>
+                                <rect x="60" y="10" width="300" height="20" rx="3" fill="none" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4"/>
+                                <!-- Segment blocks that slide into place -->
+                                <rect id="target-block-1" x="60" y="10" width="100" height="20" fill="rgba(34, 211, 238, 0.7)" opacity="0"/>
+                                <rect id="target-block-2" x="160" y="10" width="100" height="20" fill="rgba(250, 204, 21, 0.7)" opacity="0"/>
+                                <rect id="target-block-3" x="260" y="10" width="100" height="20" fill="rgba(99, 102, 241, 0.7)" opacity="0"/>
+                            </g>
+
+                            <!-- Connecting Slicing Indicator Lines -->
+                            <path d="M 170,30 L 170,170 M 270,110 L 270,170" fill="none" stroke="rgba(0,0,0,0.15)" stroke-dasharray="2"/>
+                        </svg>
+                    </div>
+                </div>
+
+                <div class="flex justify-between items-center border-t border-slate-200/60 pt-4 text-xs font-mono text-slate-500">
+                    <div>FOCUS COMBINATION MERGES THREE DIMENSIONS DOWN TO ONE STREAM</div>
+                    <div>SLIDE 05 / 10</div>
+                </div>
+            </div>
+
+            <!-- ============================================== -->
+            <!-- SLIDE 8: STEP 2 - IQ DEMODULATION -->
+            <!-- ============================================== -->
+            <div class="slide flex-col justify-between h-full w-full z-10" id="slide-8">
+                <div class="flex justify-between items-start mb-2">
+                    <div>
+                        <span class="text-xs font-mono tracking-widest text-brand-400 uppercase">Reduction Step 02</span>
+                        <h2 class="text-3xl font-extrabold mt-1">IQ Baseband Demodulation</h2>
+                    </div>
+                </div>
+
+                <div class="flex-grow grid grid-cols-12 gap-8 items-center my-auto">
+                    <!-- Left: Mathematical concept -->
+                    <div class="col-span-5 space-y-6">
+                        <div>
+                            <span class="text-xs font-mono text-slate-500">REDUCED CARRIER BANDWIDTH</span>
+                            <div class="text-4xl font-extrabold font-mono tracking-tight text-brand-400 mt-2">
+                                Complex Envelope
+                            </div>
+                            <span class="text-sm text-slate-600 mt-1 block leading-relaxed">
+                                Separating the high-frequency center carrier wave to retain only In-phase ($I$) and Quadrature ($Q$) components.
+                            </span>
+                        </div>
+
+                        <div class="bg-slate-100/50 border border-slate-200 p-4 rounded-xl space-y-2">
+                            <div class="flex justify-between font-mono text-xs">
+                                <span class="text-slate-600">In-phase (I):</span>
+                                <span class="text-brand-400 font-bold">$A(t) \cos(\phi(t))$</span>
+                            </div>
+                            <div class="flex justify-between font-mono text-xs">
+                                <span class="text-slate-600">Quadrature (Q):</span>
+                                <span class="text-accent-coral font-bold">$A(t) \sin(\phi(t))$</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right: Waveform visualizer canvas -->
+                    <div class="col-span-7 bg-slate-100/60 rounded-2xl border border-slate-200/80 h-[360px] p-4 flex flex-col justify-between relative overflow-hidden">
+                        <span class="text-xs font-mono text-slate-600">WAVE SIGNAL TRANSFORM</span>
+                        <div class="flex-grow flex flex-col justify-around py-4">
+                            <!-- High Frequency Carrier -->
+                            <div class="space-y-1">
+                                <div class="flex justify-between text-[11px] font-mono text-slate-500">
+                                    <span>Raw RF Oscillations (5 MHz)</span>
+                                </div>
+                                <div class="h-16 w-full bg-white rounded-lg overflow-hidden relative">
+                                    <canvas id="canvas-rf" class="w-full h-full"></canvas>
+                                </div>
+                            </div>
+
+                            <!-- Low Frequency Baseband Envelope -->
+                            <div class="space-y-1">
+                                <div class="flex justify-between text-[11px] font-mono text-slate-500">
+                                    <span>Demodulated Complex Components (I & Q)</span>
+                                </div>
+                                <div class="h-20 w-full bg-white rounded-lg overflow-hidden relative">
+                                    <canvas id="canvas-iq" class="w-full h-full"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-between items-center border-t border-slate-200/60 pt-4 text-xs font-mono text-slate-500">
+                    <div>IQ DEMODULATION CONVERTS RAPID ANALOG RF TO DIGITAL BASEBAND ENVELOPE</div>
+                    <div>SLIDE 06 / 10</div>
+                </div>
+            </div>
+
+            <!-- ============================================== -->
+            <!-- SLIDE 9: STEP 3 - DECIMATION -->
+            <!-- ============================================== -->
+            <div class="slide flex-col justify-between h-full w-full z-10" id="slide-9">
+                <div class="flex justify-between items-start mb-2">
+                    <div>
+                        <span class="text-xs font-mono tracking-widest text-brand-400 uppercase">Reduction Step 03</span>
+                        <h2 class="text-3xl font-extrabold mt-1">Decimation & Downsampling</h2>
+                    </div>
+                </div>
+
+                <div class="flex-grow grid grid-cols-12 gap-8 items-center my-auto">
+                    <!-- Left: Sampling Rate scale down -->
+                    <div class="col-span-5 space-y-6">
+                        <div>
+                            <span class="text-xs font-mono text-slate-500">DEPTH SAMPLE COMPRESSION</span>
+                            <div class="text-6xl font-extrabold font-mono tracking-tight text-emerald-400 mt-2">
+                                4x Down
+                            </div>
+                            <span class="text-sm font-mono text-slate-600 mt-1 block">Depth Samples: 800 ➔ 200</span>
+                        </div>
+
+                        <div class="bg-slate-100/50 border border-slate-200 p-4 rounded-xl space-y-2 text-xs leading-relaxed text-slate-600">
+                            Because the carrier frequency is completely removed, Nyquist criteria relates to the signal bandwidth rather than carrier frequency. We safely downsample the depth resolution with **zero phase loss**.
+                        </div>
+                    </div>
+
+                    <!-- Right: Decimation simulator -->
+                    <div class="col-span-7 bg-slate-100/60 rounded-2xl border border-slate-200/80 h-[360px] p-6 flex flex-col justify-between relative overflow-hidden">
+                        <span class="text-xs font-mono text-slate-600">DOWNSAMPLING RESOLUTION VISUALIZATION</span>
+                        
+                        <div class="flex-grow flex flex-col justify-center space-y-6">
+                            <!-- High Sampling Row -->
+                            <div class="space-y-2">
+                                <span class="text-xs font-mono text-slate-500">OVERSAMPLED RF GRID (800 Points)</span>
+                                <div class="flex justify-between gap-1 h-3">
+                                    <!-- Dynamic points loop generated via javascript in script block -->
+                                    <div class="flex-grow flex justify-between px-2" id="grid-high"></div>
+                                </div>
+                            </div>
+
+                            <!-- Decimated Row -->
+                            <div class="space-y-2">
+                                <span class="text-xs font-mono text-brand-400">DECIMATED BASEBAND GRID (200 Points)</span>
+                                <div class="flex justify-between gap-1 h-3">
+                                    <div class="flex-grow flex justify-between px-2" id="grid-low"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="text-xs font-mono text-slate-500 text-center">
+                            A complex baseband format (I/Q) retains sub-resolution distance indices.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-between items-center border-t border-slate-200/60 pt-4 text-xs font-mono text-slate-500">
+                    <div>DECIMATING DEPTH WITHOUT VIOLATING NYQUIST CRITERION</div>
+                    <div>SLIDE 07 / 10</div>
+                </div>
+            </div>
+
+            <!-- ============================================== -->
+            <!-- SLIDE 10: CUMULATIVE FOOTPRINT SAVINGS -->
+            <!-- ============================================== -->
+            <div class="slide flex-col justify-between h-full w-full z-10" id="slide-10">
+                <div class="flex justify-between items-start mb-2">
+                    <div>
+                        <span class="text-xs font-mono tracking-widest text-brand-400 uppercase">Acoustic Optimization Verdict</span>
+                        <h2 class="text-3xl font-extrabold mt-1">Cumulative Footprint Saved</h2>
+                    </div>
+                </div>
+
+                <div class="flex-grow grid grid-cols-12 gap-8 items-center my-auto">
+                    <!-- Left: Large Metrics -->
+                    <div class="col-span-5 space-y-6">
+                        <div>
+                            <span class="text-xs font-mono text-slate-500">FINAL REDUCED FOOTPRINT</span>
+                            <div class="text-6xl font-extrabold font-mono tracking-tight text-emerald-400 mt-2">
+                                83.3% Saved
+                            </div>
+                            <span class="text-sm font-mono text-slate-600 mt-1 block">14,745,600 Values vs. Original 88.5M</span>
+                        </div>
+
+                        <div class="h-[1px] bg-slate-200"></div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <span class="text-xs font-mono text-slate-500">ORIGINAL TENSOR</span>
+                                <span class="text-sm font-bold font-mono text-slate-700 block">88,473,600 Values</span>
+                            </div>
+                            <div>
+                                <span class="text-xs font-mono text-slate-500">OPTIMIZED IQ TENSOR</span>
+                                <span class="text-sm font-bold font-mono text-brand-400 block">14,745,600 Values</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right: Dynamic reduction waterfall chart -->
+                    <div class="col-span-7 bg-slate-100/60 rounded-2xl border border-slate-200/80 h-[360px] p-6 flex flex-col justify-around relative overflow-hidden">
+                        <!-- Horizontal Bar 1 -->
+                        <div class="space-y-2">
+                            <div class="flex justify-between text-xs font-mono">
+                                <span class="text-slate-600">1. Original Multi-Foci Data (4D RF)</span>
+                                <span class="text-slate-700">100% (88.5M)</span>
+                            </div>
+                            <div class="h-6 w-full bg-white rounded-full overflow-hidden border border-slate-200">
+                                <div class="h-full bg-slate-300" style="width: 100%"></div>
+                            </div>
+                        </div>
+
+                        <!-- Horizontal Bar 2 -->
+                        <div class="space-y-2">
+                            <div class="flex justify-between text-xs font-mono">
+                                <span class="text-slate-600">2. Merged Foci (Focus Slicing)</span>
+                                <span class="text-slate-700">33.3% (29.5M)</span>
+                            </div>
+                            <div class="h-6 w-full bg-white rounded-full overflow-hidden border border-slate-200">
+                                <div class="h-full bg-brand-600" style="width: 33.3%"></div>
+                            </div>
+                        </div>
+
+                        <!-- Horizontal Bar 3 -->
+                        <div class="space-y-2">
+                            <div class="flex justify-between text-xs font-mono">
+                                <span class="text-brand-400 font-bold">3. Baseband IQ Decimation</span>
+                                <span class="text-brand-400 font-bold">16.7% (14.7M)</span>
+                            </div>
+                            <div class="h-6 w-full bg-white rounded-full overflow-hidden border border-slate-200">
+                                <div class="h-full bg-emerald-500" style="width: 16.7%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-between items-center border-t border-slate-200/60 pt-4 text-xs font-mono text-slate-500">
+                    <div>REPRESENTATIONS CAN BE COMMITTED TO HARDWARE WITH MINIMAL DATA OVERHEAD</div>
+                    <div>SLIDE 08 / 10</div>
+                </div>
+            </div>
+
+            <!-- ============================================== -->
+            <!-- SLIDE 11: MASKED AUTOENCODER GRID EFFICIENCY -->
+            <!-- ============================================== -->
+            <div class="slide flex-col justify-between h-full w-full z-10" id="slide-11">
+                <div class="flex justify-between items-start mb-2">
+                    <div>
+                        <span class="text-xs font-mono tracking-widest text-brand-400 uppercase">Phase 05: Representation Engine</span>
+                        <h2 class="text-3xl font-extrabold mt-1">Masking Token Optimization</h2>
+                    </div>
+                    <div class="flex gap-2">
+                        <button id="btn-trigger-mask" class="bg-brand-500/20 hover:bg-brand-500/30 text-brand-400 border border-brand-500/30 px-3 py-1.5 rounded-lg text-xs font-mono transition">
+                            <i class="fa-solid fa-ghost mr-1.5"></i>Apply 80% Mask
+                        </button>
+                    </div>
+                </div>
+
+                <div class="flex-grow grid grid-cols-12 gap-8 items-center my-auto">
+                    <!-- Left: MAE architecture token metrics -->
+                    <div class="col-span-5 space-y-6">
+                        <div>
+                            <span class="text-xs font-mono text-slate-500">UNMASKED PROCESSING TOKENS</span>
+                            <div class="text-6xl font-extrabold font-mono tracking-tight text-brand-400 mt-2">
+                                720 Tokens
+                            </div>
+                            <span class="text-sm font-mono text-slate-600 mt-1 block">Instead of raw volume's 3,600 patches</span>
+                        </div>
+
+                        <div class="bg-slate-100/50 border border-slate-200 p-4 rounded-xl space-y-2 text-xs text-slate-600 leading-relaxed">
+                            Because the encoder only executes computations for visible patches, we bypass the quadratic scaling wall completely. A shallow decoder manages the full reconstruction back to the raw IQ target layout.
+                        </div>
+                    </div>
+
+                    <!-- Right: Interactive Grid Token Simulator -->
+                    <div class="col-span-7 bg-slate-100/60 rounded-2xl border border-slate-200/80 h-[360px] p-6 flex flex-col justify-between relative overflow-hidden">
+                        <div class="flex justify-between text-xs font-mono">
+                            <span class="text-slate-600">Token Patch Layout Grid (15 × 15)</span>
+                            <span class="text-brand-400 font-bold" id="mask-status">UNMASKED (100% VISIBLE)</span>
+                        </div>
+
+                        <!-- Matrix container -->
+                        <div class="flex-grow flex items-center justify-center p-2">
+                            <div class="grid grid-cols-15 gap-1.5 p-2 bg-white rounded-xl" id="token-grid">
+                                <!-- Dynamic JS Grid blocks -->
+                            </div>
+                        </div>
+
+                        <div class="flex justify-around text-xs font-mono text-slate-500">
+                            <div><span class="inline-block w-2 h-2 bg-brand-400 rounded-sm mr-1"></span>Encoder (20%)</div>
+                            <div><span class="inline-block w-2 h-2 bg-slate-200 rounded-sm mr-1"></span>Masked Out (80%)</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-between items-center border-t border-slate-200/60 pt-4 text-xs font-mono text-slate-500">
+                    <div>MAE PARADIGM COMMITS WORKSTATION NODE VRAM ONLY TO VISIBLE PATCHES</div>
+                    <div>SLIDE 09 / 10</div>
+                </div>
+            </div>
+
+            <!-- ============================================== -->
+            <!-- SLIDE 12: CONCLUSION / OUTRO -->
+            <!-- ============================================== -->
+            <div class="slide flex-col justify-between h-full w-full z-10" id="slide-12">
+                <div class="flex-grow flex flex-col justify-center items-center text-center space-y-6">
+                    <div class="w-16 h-16 bg-brand-500/10 border border-brand-500/20 text-brand-400 text-3xl rounded-full flex items-center justify-center">
+                        <i class="fa-solid fa-graduation-cap"></i>
+                    </div>
+                    <h2 class="text-4xl font-extrabold tracking-tight">Pre-training Blueprint Complete</h2>
+                    <p class="text-slate-600 font-light max-w-xl leading-relaxed">
+                        By integrating focal zone stitching, complex baseband IQ transformations, and dynamic high-ratio token masking, we can establish self-supervised foundation layers on raw acoustics using standard computing nodes.
+                    </p>
+                    <div class="flex gap-4 font-mono text-xs text-slate-500 pt-4">
+                        <span>• FOCUS STITCHING COMPLETE</span>
+                        <span>• COMPLEX IQ DEMODULATED</span>
+                        <span>• VRAM CONSTRAINTS SATISFIED</span>
+                    </div>
+                </div>
+
+                <div class="flex justify-between items-center border-t border-slate-200/60 pt-4 text-xs font-mono text-slate-500">
+                    <div>SUMMARY REPORT & STRATEGY CONCLUDED</div>
+                    <div>SLIDE 10 / 10</div>
+                </div>
+            </div>
+
+            <!-- CONTROLS FOOTER -->
+            <footer class="flex justify-between items-center mt-6 pt-4 border-t border-slate-200/60 z-20">
+                <div class="flex gap-2">
+                    <button id="btn-prev" class="bg-slate-200 hover:bg-slate-300 text-slate-800 border border-slate-300/60 px-4 py-2 rounded-xl text-sm font-mono transition flex items-center gap-2">
+                        <i class="fa-solid fa-arrow-left"></i> PREV
+                    </button>
+                    <button id="btn-next" class="bg-brand-500 hover:bg-brand-400 text-white px-4 py-2 rounded-xl text-sm font-mono transition flex items-center gap-2">
+                        NEXT <i class="fa-solid fa-arrow-right"></i>
+                    </button>
+                </div>
+
+                <!-- Dots Progress Tracker -->
+                <div class="flex gap-2.5" id="dots-container"></div>
+
+                <div class="text-xs font-mono text-slate-500">
+                    Press <kbd class="px-1.5 py-0.5 bg-slate-200 border border-slate-300 rounded">Left</kbd> / <kbd class="px-1.5 py-0.5 bg-slate-200 border border-slate-300 rounded">Right</kbd> arrow keys to navigate
+                </div>
+            </footer>
+
+        </div>
+    </main>
+
+    <!-- SYSTEM FOOTER -->
+    <footer class="max-w-6xl w-full mx-auto flex justify-between items-center px-4 py-2 text-[11px] font-mono text-slate-600 z-20">
+        <div>RAW ULTRASOUND REPRESENTATION INITIATIVE • TU MUNICH</div>
+        <div>STABILITY: RUNNABLE ON COMPUTE TIER-3 WORKSTATIONS</div>
+    </footer>
+
+    <!-- INTERACTIVE PRESENTATION LOGIC AND SIMULATION CONTROLLERS -->
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // Clock controller
+            function updateClock() {
+                const now = new Date();
+                const clock = document.getElementById('clock');
+                if (clock) {
+                    clock.textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                }
+            }
+            setInterval(updateClock, 1000);
+            updateClock();
+
+            // Slide Engine State
+            const slides = document.querySelectorAll('.slide');
+            let currentSlideIndex = 0;
+
+            const dotsContainer = document.getElementById('dots-container');
+            const btnPrev = document.getElementById('btn-prev');
+            const btnNext = document.getElementById('btn-next');
+
+            // Generate Navigation Dots
+            slides.forEach((_, idx) => {
+                const dot = document.createElement('button');
+                dot.className = `w-2.5 h-2.5 rounded-full transition-all duration-300 ${idx === 0 ? 'bg-brand-400 w-6' : 'bg-slate-300 hover:bg-slate-500'}`;
+                dot.addEventListener('click', () => {
+                    goToSlide(idx);
+                });
+                dotsContainer.appendChild(dot);
+            });
+
+            const dots = dotsContainer.querySelectorAll('button');
+
+            function goToSlide(index) {
+                if (index < 0 || index >= slides.length) return;
+                
+                // Hide current active
+                slides[currentSlideIndex].classList.remove('active');
+                dots[currentSlideIndex].className = 'w-2.5 h-2.5 rounded-full bg-slate-300 hover:bg-slate-500 transition-all duration-300';
+
+                // Update index
+                currentSlideIndex = index;
+
+                // Show new active
+                slides[currentSlideIndex].classList.add('active');
+                dots[currentSlideIndex].className = 'w-2.5 h-2.5 rounded-full bg-brand-400 w-6 transition-all duration-300';
+
+                // Custom script triggers per slide
+                handleSlideActivation(currentSlideIndex);
+            }
+
+            btnPrev.addEventListener('click', () => {
+                goToSlide(currentSlideIndex - 1);
+            });
+
+            btnNext.addEventListener('click', () => {
+                if (currentSlideIndex === slides.length - 1) {
+                    goToSlide(0); // Loop back
+                } else {
+                    goToSlide(currentSlideIndex + 1);
+                }
+            });
+
+            // Keyboard Navigation Listener
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'ArrowRight' || e.key === 'Space') {
+                    e.preventDefault();
+                    btnNext.click();
+                } else if (e.key === 'ArrowLeft') {
+                    e.preventDefault();
+                    btnPrev.click();
+                }
+            });
+
+
+            // ==============================================
+            // SLIDE SPECIFIC ENGINE AND ANIMATIONS
+            // ==============================================
+            
+            // ==============================================
+            // Slide 2: Acquisition Dimension Animation
+            // ==============================================
+            const transducerArray = document.getElementById('array-elements');
+            const pulseContainer = document.getElementById('pulses-container');
+            const triggerFociBtn = document.getElementById('btn-trigger-foci');
+
+            // Generate 48 element ticks across 420px probe bar
+            for (let i = 0; i < 48; i++) {
+                const x = 10 + (i / 47) * 420;
+                const tick = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                tick.setAttribute('x1', x); tick.setAttribute('y1', '8');
+                tick.setAttribute('x2', x); tick.setAttribute('y2', '32');
+                tick.setAttribute('stroke', '#94a3b8'); tick.setAttribute('stroke-width', '0.8');
+                transducerArray.appendChild(tick);
+            }
+
+            // Data matrix canvas
+            const dataCanvas = document.getElementById('data-matrix-canvas');
+            let dataCtx = null;
+
+            function initDataMatrix() {
+                if (!dataCanvas) return;
+                dataCanvas.width = dataCanvas.parentElement.clientWidth || 200;
+                dataCanvas.height = dataCanvas.parentElement.clientHeight || 150;
+                dataCtx = dataCanvas.getContext('2d');
+                dataCtx.fillStyle = '#f8fafc';
+                dataCtx.fillRect(0, 0, dataCanvas.width, dataCanvas.height);
+                dataCtx.strokeStyle = 'rgba(148,163,184,0.4)';
+                dataCtx.lineWidth = 0.5;
+                [1/3, 2/3].forEach(f => {
+                    const y = Math.round(dataCanvas.height * f);
+                    dataCtx.beginPath(); dataCtx.moveTo(0, y); dataCtx.lineTo(dataCanvas.width, y); dataCtx.stroke();
+                });
+            }
+
+            function fillDataColumn(sl, fz) {
+                if (!dataCtx || !dataCanvas) return;
+                const W = dataCanvas.width, H = dataCanvas.height;
+                const colW = Math.max(1, W / 192);
+                const bandH = H / 3;
+                const colors = ['rgba(34,211,238,0.75)', 'rgba(202,138,4,0.85)', 'rgba(99,102,241,0.75)'];
+                dataCtx.fillStyle = colors[fz];
+                dataCtx.fillRect(sl * colW, fz * bandH, colW + 0.5, bandH);
+            }
+
+            let acquisitionLoopInterval = null;
+            const fzDepths = ['17.7 mm depth', '29.6 mm depth', '41.4 mm depth'];
+            const fzStrokeColors = ['#22d3ee', '#ca8a04', '#a78bfa'];
+            const svgFocalY = [121, 180, 239];
+            const beamSpread = [35, 55, 80];
+
+            function updateAcqState(sl, fz, rx) {
+                const probeLeft = 10, probeW = 420, txW = 140;
+                const scanX = probeLeft + (sl / 191) * probeW;
+                let txLeft = Math.max(probeLeft, Math.min(scanX - txW / 2, probeLeft + probeW - txW));
+
+                // TX window
+                const txRect = document.getElementById('tx-aperture-rect');
+                const txLabel = document.getElementById('tx-ap-label');
+                if (txRect) { txRect.setAttribute('x', txLeft); txLabel.setAttribute('x', txLeft + txW / 2); }
+
+                // Scan line indicator
+                const slLine = document.getElementById('scanline-indicator');
+                if (slLine) { slLine.setAttribute('x1', scanX); slLine.setAttribute('x2', scanX); }
+
+                // Beam paths: active fz is bright, others dim
+                ['path-shallow', 'path-mid', 'path-deep'].forEach((id, i) => {
+                    const p = document.getElementById(id);
+                    if (!p) return;
+                    const sp = beamSpread[i], fy = svgFocalY[i];
+                    p.setAttribute('d', `M${scanX},32 L${scanX},${fy} M${scanX-sp},32 L${scanX},${fy} M${scanX+sp},32 L${scanX},${fy}`);
+                    p.setAttribute('opacity', i === fz ? '0.85' : '0.12');
+                    p.setAttribute('stroke-width', i === fz ? '2' : '1');
+                });
+
+                // RX aperture highlights
+                const rx1 = document.getElementById('rx-aper-1'), rx2 = document.getElementById('rx-aper-2');
+                if (rx1 && rx2) {
+                    rx1.setAttribute('fill', rx === 0 ? 'rgba(139,92,246,0.22)' : 'rgba(139,92,246,0.05)');
+                    rx1.setAttribute('stroke', rx === 0 ? 'rgba(139,92,246,0.85)' : 'rgba(139,92,246,0.2)');
+                    rx2.setAttribute('fill', rx === 1 ? 'rgba(139,92,246,0.22)' : 'rgba(139,92,246,0.05)');
+                    rx2.setAttribute('stroke', rx === 1 ? 'rgba(139,92,246,0.85)' : 'rgba(139,92,246,0.2)');
+                }
+
+                // Expanding wavefront pulse
+                pulseContainer.innerHTML = '';
+                const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                c.setAttribute('cx', String(scanX)); c.setAttribute('cy', '32');
+                c.setAttribute('r', '3'); c.setAttribute('fill', 'none');
+                c.setAttribute('stroke', fzStrokeColors[fz]); c.setAttribute('stroke-width', '2.5');
+                const targetR = svgFocalY[fz] - 32;
+                let r = 3;
+                function expandWave() {
+                    if (r < targetR) { r += 5; c.setAttribute('r', r); c.setAttribute('opacity', String(Math.max(0, 1 - r / targetR))); requestAnimationFrame(expandWave); }
+                }
+                expandWave();
+                pulseContainer.appendChild(c);
+
+                // Update counters
+                const el = id => document.getElementById(id);
+                if (el('dim-scanline')) el('dim-scanline').textContent = sl + 1;
+                if (el('dim-focalzone')) el('dim-focalzone').textContent = fz + 1;
+                if (el('dim-rxpass')) el('dim-rxpass').textContent = rx + 1;
+                if (el('fz-depth-label')) el('fz-depth-label').textContent = fzDepths[fz];
+                if (el('rx-aperture-label')) el('rx-aperture-label').textContent = rx === 0 ? 'Ch 1–128 of 192' : 'Ch 65–192 of 192';
+                if (el('scanline-progress')) el('scanline-progress').style.width = ((sl + 1) / 192 * 100).toFixed(1) + '%';
+            }
+
+            function triggerMultifocalAcquisition() {
+                if (acquisitionLoopInterval) clearInterval(acquisitionLoopInterval);
+                initDataMatrix();
+                let step = 0; // 0–575: 192 scan lines × 3 focal zones
+
+                acquisitionLoopInterval = setInterval(() => {
+                    const sl = Math.floor(step / 3);
+                    const fz = step % 3;
+                    const rx = step % 2;
+
+                    updateAcqState(sl, fz, rx);
+                    fillDataColumn(sl, fz);
+
+                    const evEl = document.getElementById('events-done');
+                    if (evEl) evEl.textContent = (sl * 6 + fz * 2 + rx + 1) + ' / 1,152';
+
+                    step++;
+                    if (step >= 576) { step = 0; initDataMatrix(); }
+                }, 30); // 576 steps × 30ms ≈ 17s per full sweep
+            }
+
+            triggerFociBtn.addEventListener('click', triggerMultifocalAcquisition);
+
+
+            // Slide 7: Slicing Slices trigger
+            const sliceBtn = document.getElementById('btn-trigger-gate');
+            function triggerGatingSimulation() {
+                const slices = [
+                    { id: 'gate-slice-1', targetId: 'target-block-1' },
+                    { id: 'gate-slice-2', targetId: 'target-block-2' },
+                    { id: 'gate-slice-3', targetId: 'target-block-3' }
+                ];
+
+                slices.forEach((s) => {
+                    const slice = document.getElementById(s.id);
+                    const target = document.getElementById(s.targetId);
+                    
+                    // Reset positions
+                    slice.style.transition = 'none';
+                    slice.style.transform = 'translate(0px, 0px)';
+                    target.style.opacity = '0';
+
+                    // Slide Down CSS transform logic
+                    setTimeout(() => {
+                        slice.style.transition = 'transform 1.2s cubic-bezier(0.25, 1, 0.5, 1)';
+                        if (s.id === 'gate-slice-1') {
+                            slice.style.transform = 'translate(0px, 150px)';
+                        } else if (s.id === 'gate-slice-2') {
+                            slice.style.transform = 'translate(0px, 110px)';
+                        } else {
+                            slice.style.transform = 'translate(0px, 70px)';
+                        }
+                    }, 100);
+
+                    // Reveal fused target stitch track
+                    setTimeout(() => {
+                        target.style.opacity = '1';
+                        target.style.transition = 'opacity 0.3s ease';
+                    }, 1100);
+                });
+            }
+            sliceBtn.addEventListener('click', triggerGatingSimulation);
+
+
+            // Slide 8: IQ Modulation Dynamic Canvas Wave generators
+            const canvasRF = document.getElementById('canvas-rf');
+            const canvasIQ = document.getElementById('canvas-iq');
+            let rfCtx = canvasRF.getContext('2d');
+            let iqCtx = canvasIQ.getContext('2d');
+            let waveAnimFrameId = null;
+
+            function resizeCanvases() {
+                canvasRF.width = canvasRF.parentElement.clientWidth;
+                canvasRF.height = canvasRF.parentElement.clientHeight;
+                canvasIQ.width = canvasIQ.parentElement.clientWidth;
+                canvasIQ.height = canvasIQ.parentElement.clientHeight;
+            }
+
+            function animateIQWaves() {
+                let timeOffset = 0;
+
+                function draw() {
+                    rfCtx.clearRect(0, 0, canvasRF.width, canvasRF.height);
+                    iqCtx.clearRect(0, 0, canvasIQ.width, canvasIQ.height);
+
+                    const width = canvasRF.width;
+                    const heightRF = canvasRF.height;
+                    const heightIQ = canvasIQ.height;
+
+                    // 1. Draw RF oscillations
+                    rfCtx.beginPath();
+                    rfCtx.strokeStyle = '#334155';
+                    rfCtx.lineWidth = 1.5;
+                    for (let x = 0; x < width; x++) {
+                        // High-frequency carrier wave modulated by a Gaussian Envelope envelope
+                        const relativeX = (x / width) - 0.5;
+                        const envelope = Math.exp(-Math.pow(relativeX * 5, 2)); // Gaussian curve
+                        const wave = Math.sin(x * 0.4 - timeOffset) * (heightRF / 2.5) * envelope;
+                        
+                        const y = (heightRF / 2) + wave;
+                        if (x === 0) rfCtx.moveTo(x, y);
+                        else rfCtx.lineTo(x, y);
+                    }
+                    rfCtx.stroke();
+
+                    // 2. Draw I (Cyan) and Q (Coral) components
+                    // In-phase
+                    iqCtx.beginPath();
+                    iqCtx.strokeStyle = '#38bdf8';
+                    iqCtx.lineWidth = 2.5;
+                    for (let x = 0; x < width; x++) {
+                        const relativeX = (x / width) - 0.5;
+                        const envelope = Math.exp(-Math.pow(relativeX * 5, 2));
+                        const iComp = Math.cos(x * 0.05 - timeOffset * 0.15) * (heightIQ / 3.2) * envelope;
+                        const y = (heightIQ / 2) + iComp;
+                        if (x === 0) iqCtx.moveTo(x, y);
+                        else iqCtx.lineTo(x, y);
+                    }
+                    iqCtx.stroke();
+
+                    // Quadrature (90 degrees shifted)
+                    iqCtx.beginPath();
+                    iqCtx.strokeStyle = '#ff5a5f';
+                    iqCtx.lineWidth = 2.5;
+                    for (let x = 0; x < width; x++) {
+                        const relativeX = (x / width) - 0.5;
+                        const envelope = Math.exp(-Math.pow(relativeX * 5, 2));
+                        const qComp = Math.sin(x * 0.05 - timeOffset * 0.15) * (heightIQ / 3.2) * envelope;
+                        const y = (heightIQ / 2) + qComp;
+                        if (x === 0) iqCtx.moveTo(x, y);
+                        else iqCtx.lineTo(x, y);
+                    }
+                    iqCtx.stroke();
+
+                    timeOffset += 1.5;
+                    waveAnimFrameId = requestAnimationFrame(draw);
+                }
+                draw();
+            }
+
+
+            // Slide 9: Sampling Point Arrays Generator
+            const gridHigh = document.getElementById('grid-high');
+            const gridLow = document.getElementById('grid-low');
+
+            function generateSamplingGrids() {
+                gridHigh.innerHTML = '';
+                gridLow.innerHTML = '';
+                
+                // Oversampled Grid (80 points for UI visualization scale)
+                for (let i = 0; i < 64; i++) {
+                    const dot = document.createElement('div');
+                    dot.className = 'w-1 h-3 bg-slate-300 rounded-full transition-all duration-300';
+                    gridHigh.appendChild(dot);
+                }
+
+                // Decimated Grid (16 points, representing 4x reduction)
+                for (let i = 0; i < 16; i++) {
+                    const dot = document.createElement('div');
+                    dot.className = 'w-1.5 h-3 bg-emerald-500 rounded-full animate-bounce';
+                    dot.style.animationDelay = `${i * 100}ms`;
+                    gridLow.appendChild(dot);
+                }
+            }
+
+
+            // Slide 11: Token Patch masking matrix simulation
+            const tokenGrid = document.getElementById('token-grid');
+            const maskBtn = document.getElementById('btn-trigger-mask');
+            const maskStatus = document.getElementById('mask-status');
+            const gridCells = [];
+
+            function generateTokenGrid() {
+                tokenGrid.innerHTML = '';
+                gridCells.length = 0;
+
+                const totalGridElements = 225; // 15 x 15 matrix
+                for (let i = 0; i < totalGridElements; i++) {
+                    const cell = document.createElement('div');
+                    cell.className = 'w-5 h-5 bg-brand-400 rounded transition-all duration-500 hover:bg-brand-300';
+                    tokenGrid.appendChild(cell);
+                    gridCells.push(cell);
+                }
+                maskStatus.textContent = 'UNMASKED (100% VISIBLE)';
+                maskStatus.className = 'text-emerald-400 font-bold';
+            }
+
+            function triggerMAEGridMask() {
+                const maskCount = Math.floor(gridCells.length * 0.80); // 80% masking ratio
+                const indices = Array.from({length: gridCells.length}, (_, i) => i);
+                
+                // Shuffle index array
+                for (let i = indices.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [indices[i], indices[j]] = [indices[j], indices[i]];
+                }
+
+                // Apply mask blocks (fade to dark gray/black placeholders)
+                gridCells.forEach((cell) => {
+                    cell.className = 'w-5 h-5 bg-brand-400 rounded transition-all duration-700';
+                });
+
+                const maskSelection = indices.slice(0, maskCount);
+                maskSelection.forEach((idx) => {
+                    gridCells[idx].className = 'w-5 h-5 bg-slate-300 border border-slate-400 rounded transition-all duration-700 opacity-40';
+                });
+
+                maskStatus.textContent = 'MASKED ACTIVE (80% REMOVED)';
+                maskStatus.className = 'text-accent-coral font-bold animate-pulse';
+            }
+
+            maskBtn.addEventListener('click', triggerMAEGridMask);
+
+
+            // Global Active Slide script route triggers
+            function handleSlideActivation(index) {
+                // Cancel active animations to preserve compute
+                if (waveAnimFrameId) {
+                    cancelAnimationFrame(waveAnimFrameId);
+                }
+                if (acquisitionLoopInterval) {
+                    clearInterval(acquisitionLoopInterval);
+                }
+
+                // Map Actions to Slide Index
+                switch (index) {
+                    case 1: // Slide 2
+                        triggerMultifocalAcquisition();
+                        break;
+                    case 4: // Slide 5 (was 7)
+                        triggerGatingSimulation();
+                        break;
+                    case 5: // Slide 6 (was 8)
+                        resizeCanvases();
+                        animateIQWaves();
+                        break;
+                    case 6: // Slide 7 (was 9)
+                        generateSamplingGrids();
+                        break;
+                    case 8: // Slide 9 (was 11)
+                        generateTokenGrid();
+                        setTimeout(triggerMAEGridMask, 600);
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            // Window resize adjustment for Canvas layouts
+            window.addEventListener('resize', () => {
+                if (currentSlideIndex === 5) {
+                    resizeCanvases();
+                }
+            });
+
+            // Initialize Presentation Setup
+            goToSlide(0);
+        });
+    </script>
+</body>
+</html>

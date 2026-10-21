@@ -1,0 +1,23 @@
+{
+ "wi": 14,
+ "run": "spec configuration (patch 16, mask 0.75, norm_pix_loss)",
+ "k": 4,
+ "crop_size": 128,
+ "in_channels": 8,
+ "patch_size": 16,
+ "mask_ratio": 0.75,
+ "n_tokens": 64,
+ "norm_pix_loss": true,
+ "epochs": 223,
+ "crops": 11817216,
+ "hours": 1.9559254254411078,
+ "status": "completed",
+ "loss_first": 1.1995981563116618,
+ "loss_final": 0.9974454644221614,
+ "loss_min": 0.9974366541645953,
+ "variance_explained": 0.00256334583540474,
+ "rankme_first": 173.7692310820291,
+ "rankme_peak": 331.46415503376454,
+ "rankme_peak_epoch": 4,
+ "rankme_final": 165.51357456699762
+}
