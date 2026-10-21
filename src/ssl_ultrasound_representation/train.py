@@ -10,8 +10,12 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ssl_ultrasound_representation.mae.model.us_mae import SignalMAE
-from ssl_ultrasound_representation.mae.model.loss import calculate_loss
+from ssl_ultrasound_representation.mae.model.us_mae import MASK_MODES, SignalMAE
+from ssl_ultrasound_representation.mae.model.loss import (
+    LOSS_TYPES,
+    calculate_loss,
+    compute_metrics,
+)
 from ssl_ultrasound_representation.mae.model.pos_encoding import (
     build_grid_positional_encoding,
 )
@@ -61,6 +65,31 @@ def _amp_beneficial(device: str) -> bool:
     return torch.cuda.get_device_capability()[0] >= 7
 
 
+def param_groups(model: torch.nn.Module, weight_decay: float) -> list[dict]:
+    """Split parameters into decayed / non-decayed groups (standard MAE recipe).
+
+    Weight decay belongs on the weight matrices only. Applying it to biases,
+    LayerNorm gains, `mask_token` and `decoder_pos_embed` just shrinks them
+    toward zero — and those last two are the per-token capacity a masked token
+    reconstructs from, so decaying them works directly against what the model
+    is being asked to learn.
+    """
+    decay, no_decay = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        # ndim <= 1 catches every bias and LayerNorm gain; the two embeddings
+        # are higher-rank, so they need naming.
+        if p.ndim <= 1 or name.endswith(("pos_embed", "mask_token")):
+            no_decay.append(p)
+        else:
+            decay.append(p)
+    return [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+
+
 def train(config: dict | None = None) -> dict:
     if config is None:
         config = {}
@@ -69,6 +98,9 @@ def train(config: dict | None = None) -> dict:
     # Hyperparameters
     # ------------------------------------------------------------------
     lr = config.get("lr", 1.5e-4)
+    lr_schedule = config.get("lr_schedule", "cosine")  # "cosine" | "constant"
+    if lr_schedule not in ("cosine", "constant"):
+        raise ValueError(f"lr_schedule must be 'cosine' or 'constant', got {lr_schedule!r}")
     weight_decay = config.get("weight_decay", 0.05)
     epochs = config.get("epochs", 200)
     warmup_epochs = config.get("warmup_epochs", 20)
@@ -106,7 +138,23 @@ def train(config: dict | None = None) -> dict:
         print(f"GPU: {name} (sm_{cap})  |  AMP: {use_amp}")
     log_every = config.get("log_every", 10)  # progress-bar sync cadence (steps)
     mask_ratio = config.get("mask_ratio", 0.0)  # 0.0 = plain autoencoder
+    # "random" = a fresh mask per sample/step; "fixed"/"stride"/"block" hide the
+    # same tokens every step, which takes mask sampling out of the picture when
+    # debugging (e.g. an --overfit run that refuses to fit a single sample).
+    mask_mode = config.get("mask_mode", "random")
+    mask_seed = config.get("mask_seed", 0)
     loss_on = config.get("loss_on", "all")  # "all" keeps every patch supervised
+    loss_type = config.get("loss_type", "mse")
+    loss_alpha = config.get("loss_alpha", 0.5)  # second-term weight for compound losses
+    # Loss-family metrics logged every epoch beside the optimised loss (see
+    # `compute_metrics`). Envelope is the one to watch: B-mode is |IQ|, so it
+    # tracks image quality, while raw IQ mse also charges for unpredictable
+    # speckle phase. Distinct from the `physics/*` metrics, which run on whole
+    # frames every `vis_every` epochs.
+    metrics = tuple(config.get("metrics", ("mse", "envelope")))
+    unknown = [m for m in metrics if m not in LOSS_TYPES]
+    if unknown:
+        raise ValueError(f"unknown metric(s) {unknown}; valid: {LOSS_TYPES}")
     save_checkpoints = config.get("save_checkpoints", False)
 
     # Monitoring
@@ -159,6 +207,8 @@ def train(config: dict | None = None) -> dict:
         "decoder_heads": config.get("decoder_heads", 8),
         "dim_feedforward": config.get("dim_feedforward", 1024),
         "mask_ratio": mask_ratio,
+        "mask_mode": mask_mode,
+        "mask_seed": mask_seed,
     }
     model = SignalMAE(**model_config).to(device)
 
@@ -186,10 +236,12 @@ def train(config: dict | None = None) -> dict:
         if hf_repo
         else {"local_zip": data_zip, "local_metadata": data_metadata}
     )
+    overfit = config.get("overfit", False)
+    split_ratios = config.get("split_ratios", (1.0, 0.0, 0.0) if overfit else (0.85, 0.15, 0.0))
     splits, meta = build_split_datasets(
         **data_source,
         split_strategy=config.get("split_strategy", "subject"),
-        ratios=config.get("split_ratios", (0.85, 0.15, 0.0)),
+        ratios=split_ratios,
         transform=normalize_frame,
         focal_zone=config.get("focal_zone", 0),
         preload=preload,
@@ -198,6 +250,8 @@ def train(config: dict | None = None) -> dict:
         # preload path to keep peak memory low.
         share_memory=preload and num_workers > 0,
     )
+    if overfit:
+        splits["val"] = splits["train"]
 
     # Persistent workers avoid respawning (and re-reading the first frame) at
     # every epoch boundary; pointless when num_workers == 0.
@@ -225,13 +279,18 @@ def train(config: dict | None = None) -> dict:
     monitor = TrainingMonitor(
         config={
             "lr": lr,
+            "lr_schedule": lr_schedule,
             "weight_decay": weight_decay,
             "epochs": epochs,
             "warmup_epochs": warmup_epochs,
             "batch_size": batch_size,
             "grad_clip": grad_clip,
             "mask_ratio": mask_ratio,
+            "mask_mode": mask_mode,
             "loss_on": loss_on,
+            "loss_type": loss_type,
+            "loss_alpha": loss_alpha,
+            "metrics": list(metrics),
             "depth_window": depth_window,
             "transducer_window": transducer_window,
             "embed_dim": embed_dim,
@@ -262,7 +321,7 @@ def train(config: dict | None = None) -> dict:
     # ------------------------------------------------------------------
     # Optimiser + LR schedule (linear warmup -> cosine decay, per step)
     # ------------------------------------------------------------------
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = AdamW(param_groups(model, weight_decay), lr=lr)
     scaler = torch.amp.GradScaler(device_type, enabled=use_amp)
 
     steps_per_epoch = max(len(train_loader), 1)
@@ -272,6 +331,12 @@ def train(config: dict | None = None) -> dict:
     def lr_lambda(step: int) -> float:
         if step < warmup_steps:
             return (step + 1) / max(warmup_steps, 1)
+        if lr_schedule == "constant":
+            # Hold peak LR after warmup. Cosine decays to exactly 0 at the last
+            # step, which makes the tail of a debug run uninterpretable: a
+            # metric flattening there can be the model's floor or just the LR
+            # dying. Constant separates the two.
+            return 1.0
         progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
@@ -284,7 +349,13 @@ def train(config: dict | None = None) -> dict:
     # Training loop
     # ------------------------------------------------------------------
     # Loss configuration shared by the train/val passes.
-    loss_kwargs = dict(loss_on=loss_on)
+    loss_kwargs = dict(
+        loss_on=loss_on,
+        loss_type=loss_type,
+        alpha=loss_alpha,
+        depth_window=depth_window,
+        transducer_window=transducer_window,
+    )
     best_val_loss = float("inf")
 
     for epoch in range(1, epochs + 1):
@@ -293,6 +364,7 @@ def train(config: dict | None = None) -> dict:
         # would stall the pipeline on a small, launch-bound model.
         train_loss = torch.zeros((), device=device)
         grad_norm_sum = torch.zeros((), device=device)
+        train_metrics: dict[str, torch.Tensor] = {}
         train_batches = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
@@ -312,6 +384,13 @@ def train(config: dict | None = None) -> dict:
             scaler.update()
             scheduler.step()
 
+            # Monitoring only — no graph, and fp32 inside compute_metrics.
+            with torch.no_grad():
+                for k, v in compute_metrics(
+                    pred, target, mask, metrics, depth_window, transducer_window
+                ).items():
+                    train_metrics[k] = train_metrics.get(k, 0.0) + v
+
             train_loss += loss.detach()
             grad_norm_sum += grad_norm.detach()
             train_batches += 1
@@ -320,12 +399,17 @@ def train(config: dict | None = None) -> dict:
 
         avg_train_loss = (train_loss / max(train_batches, 1)).item()
         avg_grad_norm = (grad_norm_sum / max(train_batches, 1)).item()
+        avg_train_metrics = {
+            f"train/{k}": (v / max(train_batches, 1)).item()
+            for k, v in train_metrics.items()
+        }
 
         # ------------------------------------------------------------------
         # Validation
         # ------------------------------------------------------------------
         model.eval()
         val_loss = torch.zeros((), device=device)
+        val_metrics: dict[str, torch.Tensor] = {}
         val_batches = 0
 
         with torch.no_grad():
@@ -334,16 +418,31 @@ def train(config: dict | None = None) -> dict:
                 with torch.autocast(device_type=device_type, enabled=use_amp):
                     pred, target, mask = model(x, pos_embed)
                     loss = calculate_loss(pred, target, mask, **loss_kwargs)
+                for k, v in compute_metrics(
+                    pred, target, mask, metrics, depth_window, transducer_window
+                ).items():
+                    val_metrics[k] = val_metrics.get(k, 0.0) + v
                 val_loss += loss.detach()
                 val_batches += 1
 
         avg_val_loss = (val_loss / val_batches).item() if val_batches else float("nan")
+        avg_val_metrics = {
+            f"val/{k}": (v / val_batches).item() for k, v in val_metrics.items()
+        }
 
+        # Console shows the masked-patch metrics — what the MAE is actually
+        # asked to predict; the "_all" variants go to wandb.
+        metric_str = "".join(
+            f"  |  {k}: {avg_val_metrics[f'val/{k}_masked']:.6f}"
+            for k in metrics
+            if f"val/{k}_masked" in avg_val_metrics
+        )
         print(
             f"Epoch {epoch:3d}  |  "
             f"train loss: {avg_train_loss:.6f}  |  "
             f"val loss:   {avg_val_loss:.6f}  |  "
             f"lr: {scheduler.get_last_lr()[0]:.2e}"
+            f"{metric_str}"
         )
 
         monitor.log_epoch(
@@ -353,10 +452,13 @@ def train(config: dict | None = None) -> dict:
                 "val/loss": avg_val_loss,
                 "train/lr": scheduler.get_last_lr()[0],
                 "train/grad_norm": avg_grad_norm,
+                **avg_train_metrics,
+                **avg_val_metrics,
             },
         )
         if epoch == 1 or epoch % vis_every == 0 or epoch == epochs:
             monitor.log_reconstructions(epoch, model, pos_embed, device)
+            monitor.log_physics_metrics(epoch, model, pos_embed, device)
 
         # ------------------------------------------------------------------
         # Checkpoint
@@ -406,8 +508,66 @@ def _cli() -> dict:
     parser.add_argument("--warmup-epochs", type=int, dest="warmup_epochs")
     parser.add_argument("--batch-size", type=int, dest="batch_size")
     parser.add_argument("--lr", type=float)
+    parser.add_argument(
+        "--lr-schedule",
+        choices=("cosine", "constant"),
+        dest="lr_schedule",
+        help="Post-warmup LR schedule. 'cosine' (default) decays to 0 at the "
+        "final epoch; 'constant' holds the peak LR, so a metric plateau means "
+        "the model's floor rather than the schedule running out.",
+    )
     parser.add_argument("--mask-ratio", type=float, dest="mask_ratio")
+    parser.add_argument(
+        "--mask-mode",
+        choices=MASK_MODES,
+        dest="mask_mode",
+        help="How masked tokens are picked. 'random' (default) resamples per "
+        "sample and per step; 'fixed' (seeded random), 'stride' (evenly "
+        "spaced) and 'block' (contiguous tail) hide the same tokens every "
+        "step — use these for overfit/debug runs.",
+    )
+    parser.add_argument(
+        "--mask-seed",
+        type=int,
+        dest="mask_seed",
+        help="Seed for --mask-mode fixed (default 0).",
+    )
+    parser.add_argument(
+        "--overfit",
+        action="store_true",
+        help="Put all data in train and use it as val too — for single-sample "
+        "overfit sanity checks.",
+    )
+    parser.add_argument(
+        "--split-ratios",
+        type=float,
+        nargs=3,
+        dest="split_ratios",
+        metavar=("TRAIN", "VAL", "TEST"),
+        help="Fraction of data for each split (must sum to 1). "
+        "Example: --split-ratios 0.8 0.2 0.0",
+    )
     parser.add_argument("--loss-on", choices=["all", "masked"], dest="loss_on")
+    parser.add_argument(
+        "--loss-type",
+        dest="loss_type",
+        help="Loss function: mse, envelope, log_envelope, phase, spectral, "
+        "or two '+'-joined terms (e.g. 'mse+envelope'). Default: mse.",
+    )
+    parser.add_argument(
+        "--loss-alpha",
+        type=float,
+        dest="loss_alpha",
+        help="Weight of the second term for compound --loss-type (default 0.5).",
+    )
+    parser.add_argument(
+        "--metrics",
+        nargs="+",
+        choices=LOSS_TYPES,
+        help="Extra reconstruction metrics logged every epoch (not optimised). "
+        "Each is logged over the masked patches and over all patches: "
+        "train/<name>_masked, val/<name>_all, etc. Default: mse envelope.",
+    )
     parser.add_argument("--depth-window", type=int, dest="depth_window")
     parser.add_argument("--transducer-window", type=int, dest="transducer_window")
     parser.add_argument("--embed-dim", type=int, dest="embed_dim")
@@ -467,13 +627,18 @@ def _cli() -> dict:
     )
     args = vars(parser.parse_args())
 
-    config = {k: v for k, v in args.items() if v not in (None, False)}
+    # Identity checks, not `v not in (None, False)`: 0 == False in Python, so a
+    # value test silently drops every explicitly-passed zero (--warmup-epochs 0,
+    # --mask-ratio 0, --focal-zone 0) and falls back to the default instead.
+    config = {k: v for k, v in args.items() if v is not None and v is not False}
     if config.pop("no_wandb", None):
         config["use_wandb"] = False
     if config.pop("no_preload", None):
         config["preload"] = False
     if config.pop("no_amp", None):
         config["amp"] = False
+    if "split_ratios" in config:
+        config["split_ratios"] = tuple(config["split_ratios"])
     return config
 
 
