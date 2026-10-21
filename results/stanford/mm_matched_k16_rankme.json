@@ -1,0 +1,84 @@
+{
+ "wi": 16,
+ "kind": "rankme",
+ "variant": "mm_matched",
+ "k": 16,
+ "band": "restricted",
+ "crop_size": 64,
+ "crops_per_frame": 16,
+ "nvidia_frames": 117,
+ "intensity_scale_mode": "matched",
+ "intensity_scale": 0.0047818942591774105,
+ "encoders": {
+  "vicreg_A": {
+   "stanford": {
+    "rankme": 238.65,
+    "dim": 512,
+    "pc1_variance_frac": 0.1955,
+    "dims_for_90pct": 57
+   },
+   "nvidia": {
+    "rankme": 285.58,
+    "dim": 512,
+    "pc1_variance_frac": 0.0643,
+    "dims_for_90pct": 98
+   }
+  },
+  "vicreg_B": {
+   "stanford": {
+    "rankme": 166.56,
+    "dim": 512,
+    "pc1_variance_frac": 0.4866,
+    "dims_for_90pct": 19
+   },
+   "nvidia": {
+    "rankme": 294.66,
+    "dim": 512,
+    "pc1_variance_frac": 0.04,
+    "dims_for_90pct": 110
+   }
+  },
+  "random_resnet18": {
+   "stanford": {
+    "rankme": 100.35,
+    "dim": 512,
+    "pc1_variance_frac": 0.9401,
+    "dims_for_90pct": 1
+   },
+   "nvidia": {
+    "rankme": 232.6,
+    "dim": 512,
+    "pc1_variance_frac": 0.8412,
+    "dims_for_90pct": 10
+   }
+  },
+  "pca_raw": {
+   "stanford": {
+    "rankme": 55.55,
+    "dim": 64,
+    "pc1_variance_frac": 0.2148,
+    "dims_for_90pct": 42
+   },
+   "nvidia": {
+    "rankme": 61.89,
+    "dim": 64,
+    "pc1_variance_frac": 0.0776,
+    "dims_for_90pct": 54
+   }
+  },
+  "trivial": {
+   "stanford": {
+    "rankme": 1.47,
+    "dim": 2,
+    "pc1_variance_frac": 0.978,
+    "dims_for_90pct": 1
+   },
+   "nvidia": {
+    "rankme": 1.83,
+    "dim": 2,
+    "pc1_variance_frac": 0.8563,
+    "dims_for_90pct": 2
+   }
+  }
+ }
+}

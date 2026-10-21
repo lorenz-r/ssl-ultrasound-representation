@@ -1,0 +1,69 @@
+{
+ "description": "Pixel-wise NCC between NVIDIA's own two shipped reconstructions (bmode_focused vs bmode) of the SAME frame, over the -40 dB dynamic range. No beamforming involved. Establishes the ceiling any beamformer could reach against `bmode` under WI-4's original pixel-wise NCC>=0.98 gate.",
+ "n_frames": 10,
+ "mean_ncc": 0.1970003845405181,
+ "min_ncc": -0.07141683061032239,
+ "max_ncc": 0.5094847553285,
+ "frames": [
+  {
+   "idx": 0,
+   "ncc_bmode_vs_bmode_focused": 0.15679044713492982,
+   "median_abs_db": 6.008946418762207,
+   "phase_error_rad": 1.6699870824813843
+  },
+  {
+   "idx": 1,
+   "ncc_bmode_vs_bmode_focused": -0.07141683061032239,
+   "median_abs_db": 5.741437911987305,
+   "phase_error_rad": 1.9554835557937622
+  },
+  {
+   "idx": 2,
+   "ncc_bmode_vs_bmode_focused": 0.2534584714749464,
+   "median_abs_db": 5.744102478027344,
+   "phase_error_rad": 1.6991114616394043
+  },
+  {
+   "idx": 3,
+   "ncc_bmode_vs_bmode_focused": 0.11122698748876159,
+   "median_abs_db": 6.237857818603516,
+   "phase_error_rad": 1.7983680963516235
+  },
+  {
+   "idx": 4,
+   "ncc_bmode_vs_bmode_focused": 0.5094847553285,
+   "median_abs_db": 4.797964096069336,
+   "phase_error_rad": 1.5744802951812744
+  },
+  {
+   "idx": 5,
+   "ncc_bmode_vs_bmode_focused": 0.3360076362549984,
+   "median_abs_db": 4.837362289428711,
+   "phase_error_rad": 1.76725172996521
+  },
+  {
+   "idx": 6,
+   "ncc_bmode_vs_bmode_focused": 0.19930898018001322,
+   "median_abs_db": 5.558204650878906,
+   "phase_error_rad": 1.8531080484390259
+  },
+  {
+   "idx": 7,
+   "ncc_bmode_vs_bmode_focused": 0.09827402786984675,
+   "median_abs_db": 5.206535339355469,
+   "phase_error_rad": 1.4701018333435059
+  },
+  {
+   "idx": 8,
+   "ncc_bmode_vs_bmode_focused": 0.1805544268126999,
+   "median_abs_db": 7.773960113525391,
+   "phase_error_rad": 2.0398356914520264
+  },
+  {
+   "idx": 9,
+   "ncc_bmode_vs_bmode_focused": 0.19631494347080725,
+   "median_abs_db": 5.070198059082031,
+   "phase_error_rad": 1.6527478694915771
+  }
+ ]
+}

@@ -1,0 +1,112 @@
+{
+ "wi": 16,
+ "kind": "rankme",
+ "variant": "mm_matched",
+ "k": 4,
+ "band": "full",
+ "crop_size": 128,
+ "crops_per_frame": 16,
+ "nvidia_frames": 117,
+ "intensity_scale_mode": "raw",
+ "intensity_scale": 1.0,
+ "encoders": {
+  "vicreg_A": {
+   "stanford": {
+    "rankme": 165.52,
+    "dim": 512,
+    "pc1_variance_frac": 0.5562,
+    "dims_for_90pct": 18
+   },
+   "nvidia": {
+    "rankme": 279.52,
+    "dim": 512,
+    "pc1_variance_frac": 0.0532,
+    "dims_for_90pct": 100
+   }
+  },
+  "vicreg_B": {
+   "stanford": {
+    "rankme": 10.45,
+    "dim": 512,
+    "pc1_variance_frac": 0.9054,
+    "dims_for_90pct": 1
+   },
+   "nvidia": {
+    "rankme": 290.61,
+    "dim": 512,
+    "pc1_variance_frac": 0.0636,
+    "dims_for_90pct": 102
+   }
+  },
+  "mae_norm": {
+   "stanford": {
+    "rankme": 161.98,
+    "dim": 384,
+    "pc1_variance_frac": 0.0892,
+    "dims_for_90pct": 52
+   },
+   "nvidia": {
+    "rankme": 163.39,
+    "dim": 384,
+    "pc1_variance_frac": 0.0913,
+    "dims_for_90pct": 56
+   }
+  },
+  "mae_raw": {
+   "stanford": {
+    "rankme": 150.19,
+    "dim": 384,
+    "pc1_variance_frac": 0.11,
+    "dims_for_90pct": 40
+   },
+   "nvidia": {
+    "rankme": 148.44,
+    "dim": 384,
+    "pc1_variance_frac": 0.0854,
+    "dims_for_90pct": 45
+   }
+  },
+  "random_resnet18": {
+   "stanford": {
+    "rankme": 81.34,
+    "dim": 512,
+    "pc1_variance_frac": 0.9756,
+    "dims_for_90pct": 1
+   },
+   "nvidia": {
+    "rankme": 184.17,
+    "dim": 512,
+    "pc1_variance_frac": 0.9202,
+    "dims_for_90pct": 1
+   }
+  },
+  "pca_raw": {
+   "stanford": {
+    "rankme": 63.39,
+    "dim": 64,
+    "pc1_variance_frac": 0.0302,
+    "dims_for_90pct": 55
+   },
+   "nvidia": {
+    "rankme": 63.0,
+    "dim": 64,
+    "pc1_variance_frac": 0.0368,
+    "dims_for_90pct": 55
+   }
+  },
+  "trivial": {
+   "stanford": {
+    "rankme": 1.34,
+    "dim": 2,
+    "pc1_variance_frac": 0.9911,
+    "dims_for_90pct": 1
+   },
+   "nvidia": {
+    "rankme": 1.83,
+    "dim": 2,
+    "pc1_variance_frac": 0.8504,
+    "dims_for_90pct": 2
+   }
+  }
+ }
+}
