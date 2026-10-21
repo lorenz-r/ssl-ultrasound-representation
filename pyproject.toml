@@ -48,6 +48,8 @@ packages = [{ include = "ssl_us", from = "src" }]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# The original MAE package, kept as-is from main; not held to this lint config.
+extend-exclude = ["src/ssl_ultrasound_representation"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
